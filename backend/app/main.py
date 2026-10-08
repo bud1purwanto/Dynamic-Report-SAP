@@ -633,14 +633,39 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
         if unknown:
             raise HTTPException(422, f"Field tidak ada di {source.table_name}: {', '.join(sorted(unknown))}")
     frames = {}
-    for source in dto.sources:
+    for source_idx, source in enumerate(dto.sources):
         join_fields = [condition.left_field for join in dto.joins if join.left_alias == source.alias
                        for condition in (join.conditions or [JoinConditionIn(left_field=join.left_field, right_field=join.right_field)])]
         join_fields += [condition.right_field for join in dto.joins if join.right_alias == source.alias
                         for condition in (join.conditions or [JoinConditionIn(left_field=join.left_field, right_field=join.right_field)])]
         fields = list(dict.fromkeys(f.upper() for f in [*source.fields, *join_fields] if f))
+        source_filters = [f for f in source.filters if f.value.strip()]
+
+        if source_idx > 0:
+            for join in dto.joins:
+                if join.right_alias == source.alias and join.left_alias in frames:
+                    left_df = frames[join.left_alias]
+                    conditions = join.conditions or ([JoinConditionIn(left_field=join.left_field, right_field=join.right_field)]
+                                                     if join.left_field and join.right_field else [])
+                    for cond in conditions:
+                        left_col = f"{join.left_alias}.{cond.left_field.upper()}"
+                        right_col = cond.right_field.upper()
+                        upstream_source = next((s for s in dto.sources if s.alias == join.left_alias), None)
+                        has_upstream_filter = bool(upstream_source and any(f.value.strip() for f in upstream_source.filters))
+                        if has_upstream_filter and not any(f.field.upper() == right_col for f in source_filters) and left_col in left_df.columns:
+                            distinct_vals = [
+                                str(v).strip() for v in left_df[left_col].dropna().unique()
+                                if str(v).strip() and str(v).strip() != "0"
+                            ]
+                            if len(distinct_vals) == 1:
+                                source_filters.append(FilterIn(field=right_col, operator="EQ", value=distinct_vals[0]))
+                            elif len(distinct_vals) == 0 and len(left_df) > 0:
+                                warnings.append(
+                                    f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
+                                )
+
         rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
-                                      fields=fields, filters=[f for f in source.filters if f.value.strip()],
+                                      fields=fields, filters=source_filters,
                                       rowcount=dto.rowcount), token)
         frames[source.alias] = pd.DataFrame(rows, columns=fields).rename(
             columns={field: f"{source.alias}.{field}" for field in fields})

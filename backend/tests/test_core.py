@@ -153,6 +153,38 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         response = await main.download_report_run("run-1", (SimpleNamespace(user_id="alice"), "token"), db)
         self.assertIsInstance(response, StreamingResponse)
         self.assertIn("attachment", response.headers["content-disposition"])
+    async def test_pushdown_join_filter_when_upstream_is_filtered(self):
+        passed_filters = {}
+        async def read_rows(dto, _token):
+            passed_filters[dto.table_name] = dto.filters
+            if dto.table_name == "MCH1":
+                return [{"CHARG": "0000366399", "CUOBJ_BM": "12345"}]
+            return [{"OBJEK": "12345", "ATWRT": "VAL1"}]
+
+        async def structure(_token, _target, table):
+            names = ["CHARG", "CUOBJ_BM"] if table == "MCH1" else ["OBJEK", "ATWRT"]
+            return ([{"name": name, "data_type": "CHAR", "is_key": False} for name in names], "")
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="MCH1", fields=["CHARG"],
+                              filters=[main.FilterIn(field="CHARG", operator="EQ", value="0000366399")]),
+                main.SourceIn(alias="T2", table_name="AUSP", fields=["ATWRT"]),
+            ],
+            joins=[main.JoinIn(left_alias="T1", right_alias="T2", how="inner", conditions=[
+                main.JoinConditionIn(left_field="CUOBJ_BM", right_field="OBJEK"),
+            ])],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.execute_query(query, "user-token")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["T2.ATWRT"], "VAL1")
+        self.assertEqual(passed_filters["AUSP"][0].field, "OBJEK")
+        self.assertEqual(passed_filters["AUSP"][0].value, "12345")
 
 
 if __name__ == "__main__":
