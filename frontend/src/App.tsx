@@ -4,7 +4,7 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  AlertTriangle, ArrowRight, BarChart3, ChevronDown, Columns3, CopyPlus, Database, Download,
+  AlertTriangle, ArrowRight, BarChart3, BookOpen, ChevronDown, Columns3, CopyPlus, Database, Download,
   GitCompareArrows, KeyRound, Layers3, LogOut, Play, Plus, Save, Search,
   Settings2, ShieldCheck, Table2, Trash2, WandSparkles, X,
 } from 'lucide-react'
@@ -153,9 +153,66 @@ function App() {
     confirmTone?: 'danger' | 'primary'
     onConfirm: () => void
   }>({ open: false, title: '', message: '', onConfirm: () => {} })
+  const [catalogModal, setCatalogModal] = useState<{ open: boolean; targetIndex?: number }>({ open: false })
+  const [catalogSearch, setCatalogSearch] = useState('')
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogTables, setCatalogTables] = useState<{ name: string; description: string }[]>([])
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
+
+  async function openTableCatalog(targetIndex?: number) {
+    setCatalogModal({ open: true, targetIndex })
+    setCatalogSearch('')
+    setCatalogLoading(true)
+    try {
+      const res = await post<{ tables: { name: string; description: string }[] }>('/sap/search-tables', {
+        target: query.target, query: '', limit: 30,
+      })
+      setCatalogTables(res.tables || [])
+    } catch (e) {
+      setError(message(e))
+    } finally {
+      setCatalogLoading(false)
+    }
+  }
+
+  async function searchTableCatalog(q: string) {
+    setCatalogSearch(q)
+    setCatalogLoading(true)
+    try {
+      const res = await post<{ tables: { name: string; description: string }[] }>('/sap/search-tables', {
+        target: query.target, query: q, limit: 30,
+      })
+      setCatalogTables(res.tables || [])
+    } catch (e) {
+      setError(message(e))
+    } finally {
+      setCatalogLoading(false)
+    }
+  }
+
+  function pickTableFromCatalog(tableName: string) {
+    if (catalogModal.targetIndex !== undefined) {
+      updateSource(catalogModal.targetIndex, { table_name: tableName })
+    } else {
+      // Add as new table source if under 3
+      if (query.sources.length >= 3) {
+        setError('Maksimal 3 tabel pada Query Builder.')
+        setCatalogModal({ open: false })
+        return
+      }
+      const nextIndex = [0, 1, 2].find(index => !query.sources.some(source => source.alias === `T${index + 1}`))!
+      const next = { ...blankSource(nextIndex), table_name: tableName }
+      setQuery(q => ({
+        ...q,
+        sources: [...q.sources, next],
+        joins: [...q.joins, { left_alias: q.sources[0].alias, left_field: '',
+          right_alias: next.alias, right_field: '', how: 'left' }],
+      }))
+    }
+    setCatalogModal({ open: false })
+  }
 
   function showConfirm(options: {
     title: string
@@ -815,12 +872,23 @@ function App() {
               </div>
             </div></div>
           <div className="builder-grid"><section className="card source-card"><div className="section-head"><div><span className="icon-tile blue"><Database size={18} /></span><strong>Sumber Data</strong></div>
-            <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}><Plus size={16} /> Tambah Tabel</button></div>
+            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+              <button className="text-button" onClick={() => openTableCatalog()} title="Buka katalog tabel SAP"><BookOpen size={15} /> Katalog Tabel</button>
+              <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}><Plus size={16} /> Tambah Tabel</button>
+            </div></div>
             {query.sources.map((source, index) => <div className="source-form" key={index}>
               <div className="source-title"><span className="source-badge">{index + 1}</span><strong>Tabel {source.alias}</strong>
                 {index > 0 && <button className="icon-button" title="Hapus tabel" onClick={() => removeSource(index)}><Trash2 size={15} /></button>}</div>
-              <label>Nama tabel<input placeholder="Contoh: MARA" value={source.table_name}
-                onChange={e => updateSource(index, { table_name: e.target.value.toUpperCase() })} /></label>
+              <label>Nama tabel
+                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                  <input placeholder="Contoh: MARA" value={source.table_name}
+                    onChange={e => updateSource(index, { table_name: e.target.value.toUpperCase() })} />
+                  <button className="button subtle" style={{ padding: '0.45rem 0.6rem', height: '36px', whiteSpace: 'nowrap' }}
+                    onClick={() => openTableCatalog(index)} title="Cari di katalog tabel SAP">
+                    <BookOpen size={14} /> Katalog
+                  </button>
+                </div>
+              </label>
               <small className="metadata-status">{structureLoading[source.alias] ? 'Memuat struktur tabel…' :
                 metadataFor(source).length ? `${metadataFor(source).length} kolom tersedia di canvas` :
                   'Isi nama tabel; kolom akan dimuat otomatis.'}</small>
@@ -1004,6 +1072,67 @@ function App() {
               : <div className="empty-small">Belum ada riwayat.</div>}</section></>}
       </div>
     </main>
+    {catalogModal.open && (
+      <div className="modal-backdrop" onClick={() => setCatalogModal(c => ({ ...c, open: false }))}>
+        <div className="modal-card catalog-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><BookOpen size={18} /></span>
+              <span>Katalog Tabel SAP</span>
+            </div>
+            <button
+              className="icon-button"
+              title="Tutup"
+              onClick={() => setCatalogModal(c => ({ ...c, open: false }))}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', paddingBottom: '0.4rem' }}>
+            <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              Cari tabel SAP standard atau kustom dari Data Dictionary (DD02T). Klik tabel untuk langsung menggunakannya pada builder.
+            </p>
+            <div className="catalog-search-wrap">
+              <Search className="catalog-search-icon" size={16} />
+              <input
+                autoFocus
+                placeholder="Cari tabel (contoh: MARA, VBAK, EKKO, MATERIAL)..."
+                value={catalogSearch}
+                onChange={e => searchTableCatalog(e.target.value)}
+              />
+              {catalogLoading && <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Mencari…</span>}
+            </div>
+
+            <div className="catalog-list">
+              {catalogTables.map(tbl => (
+                <div key={tbl.name} className="catalog-item" onClick={() => pickTableFromCatalog(tbl.name)}>
+                  <div className="catalog-item-info">
+                    <span className="catalog-item-name">{tbl.name}</span>
+                    <span className="catalog-item-desc">{tbl.description || 'Tidak ada deskripsi'}</span>
+                  </div>
+                  <button className="catalog-item-btn" type="button">
+                    Pilih
+                  </button>
+                </div>
+              ))}
+              {!catalogLoading && catalogTables.length === 0 && (
+                <div className="catalog-empty">
+                  Tidak ditemukan tabel yang cocok dengan &quot;{catalogSearch}&quot;.
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button
+              className="button subtle"
+              onClick={() => setCatalogModal(c => ({ ...c, open: false }))}
+            >
+              Tutup
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     {confirmModal.open && (
       <div className="modal-backdrop" onClick={() => setConfirmModal(c => ({ ...c, open: false }))}>
         <div className="modal-card" onClick={e => e.stopPropagation()}>

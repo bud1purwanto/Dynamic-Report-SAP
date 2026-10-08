@@ -78,6 +78,12 @@ class StructureIn(BaseModel):
     table_name: str
 
 
+class TableSearchIn(BaseModel):
+    target: str
+    query: str = ""
+    limit: int = Field(default=30, ge=1, le=100)
+
+
 class PivotIn(BaseModel):
     rows: list[dict[str, Any]] = Field(max_length=10000)
     index: str
@@ -603,6 +609,104 @@ async def table_structure(dto: StructureIn, auth: tuple[AppSession, str] = Depen
     fields, raw = await get_structure(auth[1], target, dto.table_name)
     return {"table_name": dto.table_name.upper(),
             "fields": fields, "text": raw}
+
+
+POPULAR_SAP_TABLES = [
+    {"name": "MARA", "description": "General Material Data"},
+    {"name": "MAKT", "description": "Material Descriptions"},
+    {"name": "MARC", "description": "Plant Data for Material"},
+    {"name": "MARD", "description": "Storage Location Data for Material"},
+    {"name": "MCH1", "description": "Batches (Material/Batch Level)"},
+    {"name": "AUSP", "description": "Characteristic Values (Classification)"},
+    {"name": "VBAK", "description": "Sales Document: Header Data"},
+    {"name": "VBAP", "description": "Sales Document: Item Data"},
+    {"name": "VBKD", "description": "Sales Document: Business Data"},
+    {"name": "VBEP", "description": "Sales Document: Schedule Line Data"},
+    {"name": "LIKP", "description": "SD Document: Delivery Header Data"},
+    {"name": "LIPS", "description": "SD Document: Delivery Item Data"},
+    {"name": "VBRK", "description": "Billing Document: Header Data"},
+    {"name": "VBRP", "description": "Billing Document: Item Data"},
+    {"name": "EKKO", "description": "Purchasing Document Header"},
+    {"name": "EKPO", "description": "Purchasing Document Item"},
+    {"name": "EKET", "description": "Scheduling Agreement Schedule Lines"},
+    {"name": "EBAN", "description": "Purchase Requisition"},
+    {"name": "BKPF", "description": "Accounting Document Header"},
+    {"name": "BSEG", "description": "Accounting Document Segment"},
+    {"name": "BSIS", "description": "G/L Open Items"},
+    {"name": "BSAS", "description": "G/L Cleared Items"},
+    {"name": "KNA1", "description": "General Data in Customer Master"},
+    {"name": "KNB1", "description": "Customer Master (Company Code)"},
+    {"name": "KNVV", "description": "Customer Master Sales Data"},
+    {"name": "LFA1", "description": "Vendor Master (General Section)"},
+    {"name": "LFB1", "description": "Vendor Master (Company Code)"},
+    {"name": "LFM1", "description": "Vendor Master: Purchasing Data"},
+    {"name": "MKPF", "description": "Header: Material Document"},
+    {"name": "MSEG", "description": "Document Segment: Material (Stock Movement)"},
+    {"name": "AFKO", "description": "Order Header Data PP Orders"},
+    {"name": "AFPO", "description": "Order Item PP Orders"},
+    {"name": "AUFK", "description": "Order Master Data"},
+]
+
+
+@app.post("/api/sap/search-tables")
+async def search_tables(dto: TableSearchIn, auth: tuple[AppSession, str] = Depends(get_token)):
+    q = dto.query.strip().upper()
+    
+    # If search query is empty, return popular SAP tables first
+    if not q:
+        return {"tables": POPULAR_SAP_TABLES[:dto.limit]}
+
+    # Prioritize popular tables matching query first
+    popular_matches = [
+        t for t in POPULAR_SAP_TABLES
+        if t["name"] == q or t["name"].startswith(q) or q in t["name"] or q.lower() in t["description"].lower()
+    ]
+
+    # Attempt query from SAP DD02T
+    try:
+        target = match_target(await user_catalog(auth[1]), dto.target)
+        clean_q = re.sub(r"[^A-Za-z0-9_% ]", "", dto.query.strip())
+        where_clauses = [
+            "DDLANGUAGE = 'E' AND TABNAME NOT LIKE '/%' AND (",
+            f"TABNAME LIKE '{clean_q.upper()}%' OR",
+            f"DDTEXT LIKE '%{clean_q}%')",
+        ]
+        res = await rpc_call(auth[1], str(target["id"]), "mcp-sap__read_table", {
+            "table": "DD02T",
+            "fields": ["TABNAME", "DDTEXT"],
+            "where": where_clauses,
+            "rowcount": dto.limit * 2,
+            "resource_key": target["resource_key"],
+        })
+        raw_rows = unpack_rows(res)
+        results = []
+        seen = set()
+        # Insert popular exact/starts matches first
+        for p in popular_matches:
+            if p["name"] not in seen:
+                seen.add(p["name"])
+                results.append(p)
+
+        for r in raw_rows:
+            tname = str(r.get("TABNAME", "")).strip().upper()
+            tdesc = str(r.get("DDTEXT", "")).strip()
+            if tname and tname not in seen:
+                seen.add(tname)
+                results.append({"name": tname, "description": tdesc})
+
+        # Sort: exact match -> starts with query -> others
+        results.sort(key=lambda x: (
+            0 if x["name"] == q else (1 if x["name"].startswith(q) else 2),
+            len(x["name"]),
+            x["name"]
+        ))
+        if results:
+            return {"tables": results[:dto.limit]}
+    except Exception:
+        pass
+
+    # Fallback: filter from popular SAP tables list
+    return {"tables": popular_matches[:dto.limit]}
 
 
 async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
