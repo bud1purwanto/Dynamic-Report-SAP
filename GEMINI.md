@@ -24,3 +24,7 @@
 ## 5. Workflow Git
 - JANGAN melakukan auto commit atau push ke remote secara otomatis tanpa persetujuan eksplisit dari pengguna.
 
+## 6. Batasan Deployment & Lingkungan Production
+- **DILARANG KERAS MELAKUKAN DEPLOYMENT KE PRODUCTION**:
+  - Jangan pernah menyentuh, menyalin, memodifikasi, merestart service, atau melakukan deploy ke direktori production (`/var/www/` atau subdirektorinya).
+  - Seluruh aktivitas pengembangan, pengujian, build, dan eksekusi server hanya boleh dilakukan di dalam workspace lokal pengembangan (`/data/Projects/Dynamic-Report`).

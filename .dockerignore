@@ -1,0 +1,30 @@
+# .dockerignore
+.git
+.github
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+backend/tests/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+*.log
+scratch/
+

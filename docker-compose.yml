@@ -1,0 +1,39 @@
+services:
+  dynamic-report:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lumina-dynamic-report
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      # Database Configuration
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL wajib diisi di .env}
+      DATABASE_SCHEMA: ${DATABASE_SCHEMA:-dynamic_report}
+
+      # Centralized Identity (OIDC) & MCP Gateway
+      DASHBOARD_OIDC_ISSUER: ${DASHBOARD_OIDC_ISSUER:?DASHBOARD_OIDC_ISSUER wajib diisi di .env}
+      DASHBOARD_MCP_API_TOKEN: ${DASHBOARD_MCP_API_TOKEN:?DASHBOARD_MCP_API_TOKEN wajib diisi di .env}
+      DASHBOARD_MCP_GATEWAY_URL: ${DASHBOARD_MCP_GATEWAY_URL:?DASHBOARD_MCP_GATEWAY_URL wajib diisi di .env}
+
+      # Session & Security
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET wajib diisi di .env}
+      SESSION_EXPIRE_HOURS: ${SESSION_EXPIRE_HOURS:-24}
+      SCHEDULE_DELEGATION_DAYS: ${SCHEDULE_DELEGATION_DAYS:-30}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-sap_session}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-auto}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:8000}
+      EXPORT_MASK_FIELDS: ${EXPORT_MASK_FIELDS:-IBAN,BANKN,BANKL,STCD1,STCD2}
+
+      # Optional LLM / Ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lumina-net
+
+networks:
+  lumina-net:
+    driver: bridge
