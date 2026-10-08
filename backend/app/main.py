@@ -684,18 +684,19 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
 @app.post("/api/sap/query")
 async def run_query(dto: QueryIn, auth: tuple[AppSession, str] = Depends(get_token),
                     db: Session = Depends(get_db)):
-    if dto.report_id:
-        report = db.get(Report, dto.report_id)
+    report_id = dto.report_id
+    if report_id:
+        report = db.get(Report, report_id)
         if not report or report.owner_id != auth[0].user_id:
-            raise HTTPException(404, "Laporan tidak ditemukan.")
+            report_id = None
     try:
         result = await execute_query(dto, auth[1])
     except HTTPException as exc:
-        db.add(ReportRun(owner_id=auth[0].user_id, report_id=dto.report_id, definition=dto.model_dump(),
+        db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
                          status="error", error=str(exc.detail)[:500]))
         db.commit()
         raise
-    db.add(ReportRun(owner_id=auth[0].user_id, report_id=dto.report_id, definition=dto.model_dump(),
+    db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
                      status="success", row_count=len(result["rows"])))
     db.commit()
     return result

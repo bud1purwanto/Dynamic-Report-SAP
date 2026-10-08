@@ -161,7 +161,10 @@ function App() {
       setCredTarget(t => t || catalog.value.resources[0]?.id || '')
       setOtherTarget(t => t || catalog.value.resources[1]?.id || '')
     }
-    if (saved.status === 'fulfilled') setReports(saved.value)
+    if (saved.status === 'fulfilled') {
+      setReports(saved.value)
+      setActiveReport(cur => saved.value.some(r => r.id === cur) ? cur : '')
+    }
     if (creds.status === 'fulfilled') setCredentials(creds.value)
     const failed = [catalog, saved, creds].find(x => x.status === 'rejected')
     if (failed?.status === 'rejected') setError(message(failed.reason))
@@ -250,12 +253,43 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [structureSignature, structureKeys])
 
+  function resetWorkspace() {
+    setActiveReport('')
+    setReportName('')
+    setQuery({
+      target: servers[0]?.id || '',
+      sources: [blankSource(0)],
+      joins: [],
+      rowcount: 100,
+    })
+    setData({ columns: [], rows: [] })
+    setVisibleColumns([])
+    setVariants([])
+    setVariantName('')
+    setFlowNodes([])
+    setStructureText({})
+    setStructureFields({})
+    setStructureKeys({})
+    setStructureLoading({})
+    setFieldSearch({})
+    setFieldText({})
+    setChanges([])
+    setAiDraft(null)
+    setAiPrompt('')
+    setSchedules([])
+    setRuns([])
+    setScheduleReport('')
+    setError('')
+    setNotice('')
+  }
+
   async function login(event: React.FormEvent) {
     event.preventDefault()
     setBusy(true); setError('')
     try {
       const result = await post<{ user: User }>('/auth/login', { username: loginName, password: loginPassword })
       setUser(result.user); setLoginPassword('')
+      resetWorkspace()
       await loadWorkspace()
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
@@ -263,7 +297,8 @@ function App() {
 
   async function logout() {
     await post('/auth/logout', {}).catch(() => {})
-    setUser(null); setData({ columns: [], rows: [] }); setReports([])
+    setUser(null); setReports([])
+    resetWorkspace()
   }
 
   function metadataFor(source: Source): StructureField[] {
@@ -382,7 +417,8 @@ function App() {
     }
     setBusy(true); setError(''); setNotice('')
     try {
-      const result = await post<GridData>('/sap/query', { ...query, report_id: activeReport || null })
+      const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
+      const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
       setData(result); setVisibleColumns(result.columns)
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
         (result.warnings?.length ? ` · ${result.warnings.join(' ')}` : ''))
@@ -665,7 +701,10 @@ function App() {
         {tab === 'builder' && <>
           <div className="page-heading"><div><span className="eyebrow">REPORT DESIGNER</span><h1>Query Builder</h1>
             <p>Susun sumber data SAP, hubungkan tabel, lalu lihat hasilnya.</p></div>
-            <button className="button primary" onClick={runQuery} disabled={busy || !query.target}><Play size={16} fill="currentColor" />{busy ? 'Memproses…' : 'Jalankan Query'}</button></div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="button subtle" onClick={resetWorkspace} title="Bersihkan canvas & mulai query baru"><Plus size={16} /> Query Baru</button>
+              <button className="button primary" onClick={runQuery} disabled={busy || !query.target}><Play size={16} fill="currentColor" />{busy ? 'Memproses…' : 'Jalankan Query'}</button>
+            </div></div>
           <div className="toolbar"><div className="field-group"><label>SERVER SAP</label>
             <select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>
               {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></div>
