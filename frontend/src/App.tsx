@@ -4,9 +4,9 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  ArrowRight, BarChart3, ChevronDown, Columns3, CopyPlus, Database, Download,
+  AlertTriangle, ArrowRight, BarChart3, ChevronDown, Columns3, CopyPlus, Database, Download,
   GitCompareArrows, KeyRound, Layers3, LogOut, Play, Plus, Save, Search,
-  Settings2, ShieldCheck, Table2, Trash2, WandSparkles,
+  Settings2, ShieldCheck, Table2, Trash2, WandSparkles, X,
 } from 'lucide-react'
 import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
@@ -145,9 +145,27 @@ function App() {
   const [structureLoading, setStructureLoading] = useState<Record<string, boolean>>({})
   const [fieldSearch, setFieldSearch] = useState<Record<string, string>>({})
   const [fieldText, setFieldText] = useState<Record<string, string>>({})
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean
+    title: string
+    message: string
+    confirmLabel?: string
+    confirmTone?: 'danger' | 'primary'
+    onConfirm: () => void
+  }>({ open: false, title: '', message: '', onConfirm: () => {} })
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
+
+  function showConfirm(options: {
+    title: string
+    message: string
+    confirmLabel?: string
+    confirmTone?: 'danger' | 'primary'
+    onConfirm: () => void
+  }) {
+    setConfirmModal({ open: true, ...options })
+  }
 
   async function loadWorkspace() {
     const [catalog, saved, creds] = await Promise.allSettled([
@@ -502,18 +520,25 @@ function App() {
     finally { setBusy(false) }
   }
 
-  async function deleteReport(reportId: string, name: string) {
-    if (!window.confirm(`Hapus laporan "${name}"?`)) return
-    setBusy(true); setError('')
-    try {
-      await api(`/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' })
-      if (activeReport === reportId) {
-        resetWorkspace()
-      }
-      await loadWorkspace()
-      setNotice(`Laporan "${name}" berhasil dihapus.`)
-    } catch (e) { setError(message(e)) }
-    finally { setBusy(false) }
+  function deleteReport(reportId: string, name: string) {
+    showConfirm({
+      title: 'Hapus Laporan',
+      message: `Apakah Anda yakin ingin menghapus laporan "${name}"? Tindakan ini tidak dapat dibatalkan.`,
+      confirmLabel: 'Hapus Laporan',
+      confirmTone: 'danger',
+      onConfirm: async () => {
+        setBusy(true); setError('')
+        try {
+          await api(`/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' })
+          if (activeReport === reportId) {
+            resetWorkspace()
+          }
+          await loadWorkspace()
+          setNotice(`Laporan "${name}" berhasil dihapus.`)
+        } catch (e) { setError(message(e)) }
+        finally { setBusy(false) }
+      },
+    })
   }
 
   async function selectReport(report: Report) {
@@ -629,12 +654,20 @@ function App() {
     } catch (e) { setError(message(e)) }
   }
 
-  async function removeSchedule(id: string) {
-    if (!window.confirm('Hapus jadwal laporan ini?')) return
-    try {
-      await api(`/schedules/${id}`, { method: 'DELETE' })
-      setSchedules(await api<Schedule[]>('/schedules'))
-    } catch (e) { setError(message(e)) }
+  function removeSchedule(id: string) {
+    showConfirm({
+      title: 'Hapus Jadwal',
+      message: 'Apakah Anda yakin ingin menghapus jadwal laporan ini?',
+      confirmLabel: 'Hapus Jadwal',
+      confirmTone: 'danger',
+      onConfirm: async () => {
+        try {
+          await api(`/schedules/${id}`, { method: 'DELETE' })
+          setSchedules(await api<Schedule[]>('/schedules'))
+          setNotice('Jadwal laporan berhasil dihapus.')
+        } catch (e) { setError(message(e)) }
+      },
+    })
   }
 
   async function runScheduleNow(id: string) {
@@ -649,15 +682,22 @@ function App() {
     finally { setBusy(false) }
   }
 
-  async function removeCredential(connectionId: string) {
-    if (!window.confirm('Hapus kredensial SAP untuk target ini dari vault OIDC?')) return
-    setBusy(true); setError('')
-    try {
-      await api(`/sap/credentials/${encodeURIComponent(connectionId)}`, { method: 'DELETE' })
-      setCredentials(await api<Credential[]>('/sap/credentials'))
-      setNotice('Kredensial dihapus dari vault OIDC.')
-    } catch (e) { setError(message(e)) }
-    finally { setBusy(false) }
+  function removeCredential(connectionId: string) {
+    showConfirm({
+      title: 'Hapus Kredensial',
+      message: 'Hapus kredensial SAP untuk target ini dari vault OIDC? Anda perlu memasukkan kredensial baru untuk menghubungkan kembali.',
+      confirmLabel: 'Hapus Kredensial',
+      confirmTone: 'danger',
+      onConfirm: async () => {
+        setBusy(true); setError('')
+        try {
+          await api(`/sap/credentials/${encodeURIComponent(connectionId)}`, { method: 'DELETE' })
+          setCredentials(await api<Credential[]>('/sap/credentials'))
+          setNotice('Kredensial dihapus dari vault OIDC.')
+        } catch (e) { setError(message(e)) }
+        finally { setBusy(false) }
+      },
+    })
   }
 
   const columns = useMemo<ColDef<Row>[]>(() => data.columns
@@ -964,6 +1004,46 @@ function App() {
               : <div className="empty-small">Belum ada riwayat.</div>}</section></>}
       </div>
     </main>
+    {confirmModal.open && (
+      <div className="modal-backdrop" onClick={() => setConfirmModal(c => ({ ...c, open: false }))}>
+        <div className="modal-card" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon"><AlertTriangle size={17} /></span>
+              <span>{confirmModal.title}</span>
+            </div>
+            <button
+              className="icon-button"
+              title="Tutup"
+              onClick={() => setConfirmModal(c => ({ ...c, open: false }))}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            {confirmModal.message}
+          </div>
+          <div className="modal-actions">
+            <button
+              className="button subtle"
+              onClick={() => setConfirmModal(c => ({ ...c, open: false }))}
+            >
+              Batal
+            </button>
+            <button
+              className={`button ${confirmModal.confirmTone === 'danger' ? 'danger' : 'primary'}`}
+              onClick={() => {
+                const action = confirmModal.onConfirm
+                setConfirmModal(c => ({ ...c, open: false }))
+                action()
+              }}
+            >
+              {confirmModal.confirmLabel || 'Lanjutkan'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
   </div>
 }
 

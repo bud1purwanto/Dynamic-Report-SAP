@@ -17,3 +17,10 @@
 ## 3. Kompilasi & Pengujian
 - Setiap perubahan CSS atau UI frontend harus segera dibuild (`npm --prefix frontend run build`) dan diverifikasi kesesuaiannya agar tidak menyebabkan glitch visual, teks putih yang tidak terbaca, atau elemen bertumpukan.
 
+## 4. Modal & Dialog Konfirmasi
+- Dilarang menggunakan dialog bawaan browser (`window.confirm()`, `window.alert()`, `window.prompt()`).
+- Semua konfirmasi aksi (seperti hapus laporan, hapus jadwal, hapus kredensial) HARUS menggunakan komponen modal custom Lumina (`modal-backdrop`, `modal-card`, header dengan ikon & tombol tutup, isi deskriptif, tombol Batal dan tombol aksi bertema `danger`/`primary`).
+
+## 5. Workflow Git
+- JANGAN melakukan auto commit atau push ke remote secara otomatis tanpa persetujuan eksplisit dari pengguna.
+
