@@ -6,8 +6,10 @@ services:
     container_name: lumina-dynamic-report
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8087}:8000"
     environment:
+      APP_PORT: "8000"
+      APP_HOST: "0.0.0.0"
       # Database Configuration
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL wajib diisi di .env}
       DATABASE_SCHEMA: ${DATABASE_SCHEMA:-dynamic_report}

@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import ast
 import hashlib
 import io
@@ -20,7 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -31,9 +33,10 @@ app = FastAPI(title="Lumina Dynamic Report", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|100\.\d+\.\d+\.\d+|.*\.abap\.web\.id|abap\.web\.id)(:\d+)?$",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.session_secret.encode()).digest()))
 signer = URLSafeTimedSerializer(settings.session_secret, salt="lumina-session")
@@ -190,16 +193,27 @@ async def get_token(request: Request, db: Session = Depends(get_db)) -> tuple[Ap
         session_id = signer.loads(cookie, max_age=settings.session_hours * 3600)
     except BadSignature:
         raise HTTPException(401, "Sesi tidak valid.") from None
-    row = db.get(AppSession, session_id)
-    if not row or row.expires_at < utcnow():
-        raise HTTPException(401, "Sesi kedaluwarsa.")
-    if row.access_expires_at <= utcnow() + timedelta(seconds=60):
-        row = db.execute(
-            select(AppSession).where(AppSession.id == session_id)
-            .with_for_update().execution_options(populate_existing=True)
-        ).scalar_one_or_none()
+    try:
+        # Sesi ORM sinkron tidak boleh menahan event loop FastAPI.
+        row = await asyncio.to_thread(db.get, AppSession, session_id)
         if not row or row.expires_at < utcnow():
             raise HTTPException(401, "Sesi kedaluwarsa.")
+        if row.access_expires_at <= utcnow() + timedelta(seconds=60):
+            def lock_session():
+                # Pembaruan token paralel dapat mengunci baris sesi; batasi
+                # antreannya agar seluruh aplikasi tidak ikut menunggu.
+                db.execute(text("SET LOCAL lock_timeout = '2s'"))
+                return db.execute(
+                    select(AppSession).where(AppSession.id == session_id)
+                    .with_for_update().execution_options(populate_existing=True)
+                ).scalar_one_or_none()
+
+            row = await asyncio.to_thread(lock_session)
+            if not row or row.expires_at < utcnow():
+                raise HTTPException(401, "Sesi kedaluwarsa.")
+    except OperationalError:
+        await asyncio.to_thread(db.rollback)
+        raise HTTPException(503, "Sesi sedang diproses. Silakan coba lagi.") from None
     try:
         token = fernet.decrypt(row.access_token.encode()).decode()
     except InvalidToken:
