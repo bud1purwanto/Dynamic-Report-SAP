@@ -20,6 +20,13 @@ if [[ ! -d frontend/node_modules ]] || ! command -v npm >/dev/null 2>&1; then
 fi
 npm --prefix frontend run build
 
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 app_host="${APP_HOST:-0.0.0.0}"
 app_port="${APP_PORT:-8000}"
 api_pid=""
