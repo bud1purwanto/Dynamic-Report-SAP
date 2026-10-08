@@ -679,8 +679,6 @@ function App() {
     return conditions.map((condition, conditionIndex) => ({
       id: `join-${index}-${conditionIndex}`, source: join.left_alias, target: join.right_alias,
       sourceHandle: condition.left_field, targetHandle: condition.right_field,
-      label: condition.left_field === condition.right_field ? condition.left_field
-        : `${condition.left_field} = ${condition.right_field}`,
       markerEnd: { type: MarkerType.ArrowClosed }, style: { stroke: '#3d74c8', strokeWidth: 2 },
     }))
   }), [query.joins])
