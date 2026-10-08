@@ -4,7 +4,7 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  ArrowRight, BarChart3, ChevronDown, Columns3, Database, Download,
+  ArrowRight, BarChart3, ChevronDown, Columns3, CopyPlus, Database, Download,
   GitCompareArrows, KeyRound, Layers3, LogOut, Play, Plus, Save, Search,
   Settings2, ShieldCheck, Table2, Trash2, WandSparkles,
 } from 'lucide-react'
@@ -469,24 +469,56 @@ function App() {
   }
 
   async function saveReport() {
-    if (!reportName.trim() && !activeReport) { setError('Isi nama laporan.'); return }
+    const name = reportName.trim()
+    if (!name) { setError('Isi nama laporan.'); return }
     setBusy(true); setError('')
     try {
-      const existing = reports.find(r => r.id === activeReport)
-      const name = reportName.trim() || existing?.name || 'Laporan'
-      const saved = existing && !reportName.trim()
-        ? await api<{ id: string }>(`/reports/${existing.id}`, {
+      if (activeReport) {
+        const saved = await api<{ id: string }>(`/reports/${encodeURIComponent(activeReport)}`, {
           method: 'PUT', body: JSON.stringify({ name, definition: query }),
         })
-        : await post<{ id: string }>('/reports', { name, definition: query })
-      setActiveReport(saved.id); setReportName('')
-      await loadWorkspace(); setNotice('Laporan tersimpan.')
+        setActiveReport(saved.id)
+        setNotice(`Laporan "${name}" berhasil diperbarui.`)
+      } else {
+        const saved = await post<{ id: string }>('/reports', { name, definition: query })
+        setActiveReport(saved.id)
+        setNotice(`Laporan "${name}" berhasil disimpan.`)
+      }
+      await loadWorkspace()
+    } catch (e) { setError(message(e)) }
+    finally { setBusy(false) }
+  }
+
+  async function saveAsNewReport() {
+    const name = reportName.trim()
+    if (!name) { setError('Isi nama laporan baru.'); return }
+    setBusy(true); setError('')
+    try {
+      const saved = await post<{ id: string }>('/reports', { name, definition: query })
+      setActiveReport(saved.id)
+      await loadWorkspace()
+      setNotice(`Laporan baru "${name}" berhasil dibuat (Save As).`)
+    } catch (e) { setError(message(e)) }
+    finally { setBusy(false) }
+  }
+
+  async function deleteReport(reportId: string, name: string) {
+    if (!window.confirm(`Hapus laporan "${name}"?`)) return
+    setBusy(true); setError('')
+    try {
+      await api(`/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' })
+      if (activeReport === reportId) {
+        resetWorkspace()
+      }
+      await loadWorkspace()
+      setNotice(`Laporan "${name}" berhasil dihapus.`)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
 
   async function selectReport(report: Report) {
     setQuery(report.definition); setActiveReport(report.id); setTab('builder')
+    setReportName(report.name)
     setFieldText({}); setStructureFields({}); setStructureKeys({}); setStructureText({})
     setData({ columns: [], rows: [] }); setVisibleColumns([])
     try { setVariants(await api<typeof variants>(`/reports/${report.id}/variants`)) }
@@ -684,9 +716,21 @@ function App() {
         <button className={tab === 'schedules' ? 'active' : ''} onClick={openSchedules}><BarChart3 size={18} /> Jadwal & Riwayat</button>
       </nav>
       <div className="sidebar-label saved-label">LAPORAN TERSIMPAN <span>{reports.length}</span></div>
-      <div className="report-list">{reports.map(r => <button key={r.id} className={activeReport === r.id ? 'selected' : ''}
-        onClick={() => selectReport(r)}><Table2 size={16} /><span>{r.name}</span></button>)}
-        {!reports.length && <p>Belum ada laporan.</p>}</div>
+      <div className="report-list">{reports.map(r => (
+        <div key={r.id} className={`report-item ${activeReport === r.id ? 'selected' : ''}`}>
+          <button className="report-item-btn" onClick={() => selectReport(r)} title={r.name}>
+            <Table2 size={15} /><span>{r.name}</span>
+          </button>
+          <button
+            className="icon-button delete-report-btn"
+            title={`Hapus "${r.name}"`}
+            onClick={e => { e.stopPropagation(); deleteReport(r.id, r.name) }}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      ))}
+      {!reports.length && <p>Belum ada laporan.</p>}</div>
       <div className="sidebar-bottom"><div className="user-avatar">{(user.username || user.email || 'U')[0].toUpperCase()}</div>
         <div className="user-info"><strong>{user.username || user.email}</strong><small>{user.roles?.[0] || 'User'}</small></div>
         <button className="icon-button" title="Keluar" onClick={logout}><LogOut size={17} /></button></div>
@@ -710,9 +754,28 @@ function App() {
               {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></div>
             <div className="field-group narrow"><label>BATAS BARIS / TABEL</label>
               <input type="number" min={1} max={1000} value={query.rowcount} onChange={e => setQuery({ ...query, rowcount: Number(e.target.value) })} /></div>
-            <div className="toolbar-spacer" /><div className="field-group save-inline"><label>SIMPAN LAPORAN</label>
-              <div className="inline-control"><input placeholder="Nama laporan" value={reportName} onChange={e => setReportName(e.target.value)} />
-                <button className="button subtle" onClick={saveReport}><Save size={16} /> Simpan</button></div></div></div>
+            <div className="toolbar-spacer" /><div className="field-group save-inline">
+              <label>
+                {activeReport ? (
+                  <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>EDIT LAPORAN</span>
+                    <button type="button" className="text-button" style={{ fontSize: '10px', padding: 0 }}
+                      onClick={() => { setActiveReport(''); setReportName('') }} title="Lepas dari laporan ini untuk membuat draf baru">✕ Draf baru</button>
+                  </span>
+                ) : 'SIMPAN LAPORAN'}
+              </label>
+              <div className="inline-control">
+                <input placeholder="Nama laporan" value={reportName} onChange={e => setReportName(e.target.value)} />
+                <button className="button primary" onClick={saveReport} title={activeReport ? "Perbarui laporan ini (replace)" : "Simpan laporan"}>
+                  <Save size={15} /> Simpan
+                </button>
+                {activeReport && (
+                  <button className="button subtle" onClick={saveAsNewReport} title="Simpan sebagai laporan baru (save as)">
+                    <CopyPlus size={15} /> Simpan Baru
+                  </button>
+                )}
+              </div>
+            </div></div>
           <div className="builder-grid"><section className="card source-card"><div className="section-head"><div><span className="icon-tile blue"><Database size={18} /></span><strong>Sumber Data</strong></div>
             <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}><Plus size={16} /> Tambah Tabel</button></div>
             {query.sources.map((source, index) => <div className="source-form" key={index}>
