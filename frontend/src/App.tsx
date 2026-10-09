@@ -36,6 +36,38 @@ type Schedule = { id: string; report_id: string; interval_minutes: number;
 type ReportRun = { id: string; report_id: string | null; status: string; row_count: number; has_artifact: boolean;
   error: string | null; started_at: string }
 type StructureField = { name: string; is_key: boolean; data_type: string; check_table?: string }
+type CompareRow = { key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }
+
+function compareValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  return typeof value === 'object' ? JSON.stringify(value) : String(value)
+}
+
+function ComparisonMatrix({ row, fields, leftLabel, rightLabel, defaultOpen }: {
+  row: CompareRow; fields: string[]; leftLabel: string; rightLabel: string; defaultOpen: boolean
+}) {
+  const [expanded, setExpanded] = useState(defaultOpen)
+  const isMissing = !row.left || !row.right
+  const different = isMissing ? fields.length : row.changed_fields.length
+  const status = row.status === 'same' ? 'Sama' : row.status === 'changed' ? 'Berubah'
+    : row.status === 'only_left' ? 'Hanya sumber' : 'Hanya pembanding'
+  const orderedFields = [...fields].sort((a, b) =>
+    Number(row.changed_fields.includes(b)) - Number(row.changed_fields.includes(a)))
+
+  return <details className={`compare-record ${row.status}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary className="compare-record-head"><div className="compare-record-title"><span className={`status-tag ${row.status}`}>{status.toUpperCase()}</span>
+      <strong>{Object.entries(row.key).map(([field, value]) => `${field}: ${value}`).join(' · ')}</strong></div>
+      <div className="compare-record-counts"><span className="same-count"><CheckCircle2 size={14} /> {isMissing ? 0 : fields.length - different} sama</span>
+        <span className="different-count"><AlertTriangle size={14} /> {different} {isMissing ? 'tanpa pasangan' : 'berbeda'}</span><ChevronDown size={16} /></div></summary>
+    <div className="compare-matrix-wrap"><table className="compare-matrix"><thead><tr><th>Kolom tabel</th><th>{leftLabel}</th><th>{rightLabel}</th><th>Status</th></tr></thead>
+      <tbody>{orderedFields.map(field => {
+        const fieldDiffers = isMissing || row.changed_fields.includes(field)
+        return <tr className={fieldDiffers ? 'different' : 'same'} key={field}><th scope="row">{field}</th>
+          <td className={!row.left ? 'missing' : ''}>{row.left ? compareValue(row.left[field]) : 'Tidak ada baris'}</td>
+          <td className={!row.right ? 'missing' : ''}>{row.right ? compareValue(row.right[field]) : 'Tidak ada baris'}</td>
+          <td><span className={`matrix-status ${fieldDiffers ? 'different' : 'same'}`}>{fieldDiffers ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}{isMissing ? 'Tanpa pasangan' : fieldDiffers ? 'Berbeda' : 'Sama'}</span></td></tr>
+      })}</tbody></table></div></details>
+}
 type TableNodeData = Record<string, unknown> & {
   alias: string
   tableName: string
@@ -78,14 +110,14 @@ function TableNode({ id, data }: NodeProps<TableFlowNode>) {
       <div className="table-node-section-label">Field Terhubung</div>
       {pinnedFields.map(field => <div className="table-node-field is-joined" key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
-        <span>{field.is_key ? '◆ ' : ''}{field.name}</span><small>{field.data_type}</small>
+        <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
         <Handle type="source" position={Position.Right} id={field.name} />
       </div>)}
     </div>}
     <div className="table-node-fields nowheel nodrag" onScroll={() => updateNodeInternals(id)}>
       {otherFields.length ? otherFields.map(field => <div className="table-node-field" key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
-        <span>{field.is_key ? '◆ ' : ''}{field.name}</span><small>{field.data_type}</small>
+        <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
         <Handle type="source" position={Position.Right} id={field.name} />
       </div>) : pinnedFields.length > 0 && !search ? null : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
     </div>
@@ -147,7 +179,7 @@ function App() {
   const [compareFieldSearch, setCompareFieldSearch] = useState('')
   const [compareRowcount, setCompareRowcount] = useState(100)
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
-  const [compareRows, setCompareRows] = useState<{ key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }[]>([])
+  const [compareRows, setCompareRows] = useState<CompareRow[]>([])
   const [compareView, setCompareView] = useState<'all' | 'same' | 'different'>('all')
   const [compareVariants, setCompareVariants] = useState<CompareVariant[]>([])
   const [compareVariantName, setCompareVariantName] = useState('')
@@ -1150,7 +1182,7 @@ function App() {
                 <div className="field-selection-list">{fields.filter(field => field.name.includes(term)).map(field => {
                   const selectedFilter = source.filters.some(filter => filter.field === field.name)
                   return <div className="field-selection-row" key={field.name}><span title={field.data_type}>
-                    {field.is_key ? '◆ ' : ''}{field.name}<small>{field.data_type}</small></span>
+                    {field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}<small>{field.data_type}</small></span>
                     <input type="checkbox" aria-label={`Tampilkan ${source.table_name}.${field.name}`}
                       checked={source.fields.includes(field.name)} onChange={e => updateSource(sourceIndex, {
                         fields: e.target.checked ? [...source.fields, field.name] : source.fields.filter(name => name !== field.name),
@@ -1265,7 +1297,7 @@ function App() {
               {compareMetadataLoading ? <span className="metadata-status">Memuat kolom tabel…</span> : compareMetadataError ? <span className="metadata-status">{compareMetadataError}</span> : compareMetadata.length ? <div className="compare-field-list">{compareMetadata.filter(field => field.name.includes(compareFieldSearch) || field.data_type.toUpperCase().includes(compareFieldSearch)).map(field => {
                 const selected = compareFilters.some(filter => filter.field === field.name)
                 return <label className="compare-field-choice" key={field.name}><input type="checkbox" checked={selected} disabled={!selected && compareFilters.length >= 10} onChange={e => setCompareFilters(current => e.target.checked ? [...current, { field: field.name, operator: 'EQ', value: '' }] : current.filter(filter => filter.field !== field.name))} />
-                  <span>{field.is_key ? '◆ ' : ''}{field.name}</span><small>{field.data_type}</small></label>
+                  <span>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small></label>
               })}</div> : <span className="metadata-status">Isi nama tabel untuk melihat kolomnya.</span>}</div>
             <div className="compare-settings"><label>Batas baris per server<input type="number" min={1} max={1000} value={compareRowcount} onChange={e => setCompareRowcount(Number(e.target.value))} /></label>
               <div className="compare-filter-panel"><div className="filter-heading"><span>PARAMETER FILTER (BERLAKU UNTUK KEDUA SERVER)</span></div>
@@ -1277,10 +1309,11 @@ function App() {
           <div className="card changes-card"><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} key</span></div></div>
             {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
               <div className="compare-tabs">{([['all', 'Semua', compareRows.length], ['same', 'Sama', compareRows.filter(row => row.status === 'same').length], ['different', 'Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
-            {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="change-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) => <div className="change-item" key={i}>
-              <span className={`status-tag ${row.status}`}>{row.status === 'same' ? 'SAMA' : row.status === 'changed' ? 'BERUBAH' : row.status === 'only_left' ? 'HANYA SUMBER' : 'HANYA PEMBANDING'}</span>
-              <strong>{Object.values(row.key).join(' · ')}</strong>{row.changed_fields.length > 0 && <small>Field berbeda: {row.changed_fields.join(', ')}</small>}
-              {row.status !== 'same' && <div className="change-values"><pre>{JSON.stringify(row.left, null, 2)}</pre><ArrowRight size={16} /><pre>{JSON.stringify(row.right, null, 2)}</pre></div>}</div>)}</div>
+            {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="compare-record-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) =>
+              <ComparisonMatrix key={Object.values(row.key).join('|')} row={row} fields={compareResult.fields}
+                leftLabel={servers.find(server => server.id === compareTarget)?.label || 'Server sumber'}
+                rightLabel={servers.find(server => server.id === otherTarget)?.label || 'Server pembanding'}
+                defaultOpen={compareRows.length <= 2 || (i === 0 && compareView === 'different')} />)}</div>
               : <div className="empty-state"><strong>Tidak ada baris pada kategori ini</strong></div>)
               : <div className="empty-state"><div className="empty-illustration"><GitCompareArrows size={27} /></div><strong>Belum ada perbandingan</strong><p>Pilih dua server, tabel, dan parameter filter bila diperlukan.</p></div>}</div></>}
         {tab === 'credentials' && <><div className="page-heading"><div><span className="eyebrow">SECURE ACCESS</span><h1>Kredensial SAP</h1>
