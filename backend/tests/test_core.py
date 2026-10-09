@@ -31,10 +31,10 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
             {"name": "Z_FIELD", "position": 2}, {"name": "A_FIELD", "position": 1},
         ]}}
         with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
-             patch.object(main, "read_rows", AsyncMock()) as read:
+             patch.object(main, "read_rows", AsyncMock(return_value=[])) as read:
             fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
         self.assertEqual([field["name"] for field in fields], ["A_FIELD", "Z_FIELD"])
-        self.assertNotIn("DD03L", [call.args[0].table_name for call in read.await_args_list])
+        self.assertIn("DD03L", [call.args[0].table_name for call in read.await_args_list])
 
     async def test_structure_uses_gateway_text_then_dd03t_fallback(self):
         structure = {"structuredContent": {"fields": [
@@ -43,11 +43,29 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         ]}}
         texts = [{"FIELDNAME": "MATNR", "DDTEXT": "Different text"},
                  {"FIELDNAME": "MTART", "DDTEXT": "Material Type"}]
+        async def rows(dto, _token):
+            return texts if dto.table_name == "DD03T" else []
         with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
-             patch.object(main, "read_rows", AsyncMock(return_value=texts)) as read:
+             patch.object(main, "read_rows", AsyncMock(side_effect=rows)) as read:
             fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
         self.assertEqual([field["description"] for field in fields], ["Material Number", "Material Type"])
         self.assertEqual(read.await_args.args[0].table_name, "DD03T")
+
+    async def test_structure_uses_data_element_text_when_table_text_is_missing(self):
+        structure = {"structuredContent": {"fields": [
+            {"name": "MATNR", "position": 1}, {"name": "MTART", "position": 2},
+        ]}}
+        async def rows(dto, _token):
+            if dto.table_name == "DD03L":
+                return [{"FIELDNAME": "MATNR", "ROLLNAME": "MATNR", "POSITION": "1"},
+                        {"FIELDNAME": "MTART", "ROLLNAME": "MTART", "POSITION": "2"}]
+            if dto.table_name == "DD04T":
+                return [{"DDTEXT": "Material Number" if dto.filters[0].value == "MATNR" else "Material Type"}]
+            return []
+        with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=rows)):
+            fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
+        self.assertEqual([field["description"] for field in fields], ["Material Number", "Material Type"])
 
     async def test_user_catalog_only_returns_user_connections(self):
         resources = [

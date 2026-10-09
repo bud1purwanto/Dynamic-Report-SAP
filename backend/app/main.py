@@ -518,20 +518,22 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
     fields, raw = parse_structure(result)
     if not fields:
         return fields, raw
-    if not all(isinstance(field.get("position"), int) and field["position"] > 0 for field in fields):
+    ddic_rows: list[dict[str, Any]] = []
+    needs_description = any(not field.get("description") for field in fields)
+    if not all(isinstance(field.get("position"), int) and field["position"] > 0 for field in fields) or needs_description:
         try:
-            positions = await read_rows(ReadIn(
-                target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION"],
+            ddic_rows = await read_rows(ReadIn(
+                target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION", "ROLLNAME"],
                 filters=[FilterIn(field="TABNAME", value=table_name.upper()),
                          FilterIn(field="AS4LOCAL", value="A")], rowcount=1000,
             ), token)
             by_name = {str(row.get("FIELDNAME", "")).upper(): int(str(row["POSITION"]).strip())
-                       for row in positions if str(row.get("POSITION", "")).strip().isdigit()}
+                       for row in ddic_rows if str(row.get("POSITION", "")).strip().isdigit()}
             for field in fields:
                 field["position"] = field.get("position") or by_name.get(field["name"])
         except (HTTPException, ValueError, KeyError):
             pass
-    if any(not field.get("description") for field in fields):
+    if needs_description:
         try:
             texts = await read_rows(ReadIn(
                 target=str(target["id"]), table_name="DD03T", fields=["FIELDNAME", "DDTEXT", "DDLANGUAGE"],
@@ -547,6 +549,28 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
                 field["description"] = field.get("description") or by_name.get(field["name"], "")
         except (HTTPException, ValueError, KeyError):
             pass
+    if any(not field.get("description") for field in fields) and ddic_rows:
+        rollnames = {str(row.get("FIELDNAME", "")).upper(): str(row.get("ROLLNAME", "")).upper()
+                     for row in ddic_rows}
+        missing_rollnames = list(dict.fromkeys(
+            rollnames.get(field["name"], "") for field in fields if not field.get("description")
+            and IDENT.fullmatch(rollnames.get(field["name"], ""))))
+        async def read_element_text(rollname: str) -> tuple[str, str]:
+            try:
+                rows = await read_rows(ReadIn(
+                    target=str(target["id"]), table_name="DD04T", fields=["DDTEXT"],
+                    filters=[FilterIn(field="ROLLNAME", value=rollname),
+                             FilterIn(field="DDLANGUAGE", value="E")], rowcount=1,
+                ), token)
+                return rollname, str(rows[0].get("DDTEXT", "")).strip() if rows else ""
+            except (HTTPException, ValueError, KeyError):
+                return rollname, ""
+        texts_by_rollname: dict[str, str] = {}
+        for offset in range(0, len(missing_rollnames), 6):
+            texts_by_rollname.update(await asyncio.gather(
+                *(read_element_text(name) for name in missing_rollnames[offset:offset + 6])))
+        for field in fields:
+            field["description"] = field.get("description") or texts_by_rollname.get(rollnames.get(field["name"], ""), "")
     fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))
     return fields, raw
 

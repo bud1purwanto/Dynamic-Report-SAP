@@ -54,23 +54,116 @@ function ComparisonMatrix({ row, fields, descriptions, leftLabel, rightLabel, de
   row: CompareRow; fields: string[]; descriptions: Record<string, string>; leftLabel: string; rightLabel: string; defaultOpen: boolean
 }) {
   const [expanded, setExpanded] = useState(defaultOpen)
+  const [filterMode, setFilterMode] = useState<'all' | 'different' | 'same'>('all')
+  const [sortOrder, setSortOrder] = useState<'sap' | 'az' | 'diff_first'>('sap')
+  const [matrixSearch, setMatrixSearch] = useState('')
+
   const isMissing = !row.left || !row.right
-  const different = isMissing ? fields.length : row.changed_fields.length
+  const differentCount = isMissing ? fields.length : row.changed_fields.length
   const status = row.status === 'same' ? 'Sama' : row.status === 'changed' ? 'Berubah'
     : row.status === 'only_left' ? 'Hanya sumber' : 'Hanya pembanding'
+
+  const filteredSortedFields = useMemo(() => {
+    let result = [...fields]
+    const term = matrixSearch.trim().toUpperCase()
+
+    // 1. Text Search Filter
+    if (term) {
+      result = result.filter(field => {
+        const desc = (descriptions[field] || '').toUpperCase()
+        return field.includes(term) || desc.includes(term)
+      })
+    }
+
+    // 2. Status Filter
+    if (filterMode === 'different') {
+      result = result.filter(field => isMissing || row.changed_fields.includes(field))
+    } else if (filterMode === 'same') {
+      result = result.filter(field => !isMissing && !row.changed_fields.includes(field))
+    }
+
+    // 3. Sorting
+    if (sortOrder === 'az') {
+      result.sort((a, b) => a.localeCompare(b))
+    } else if (sortOrder === 'diff_first') {
+      result.sort((a, b) => {
+        const aDiff = isMissing || row.changed_fields.includes(a) ? 0 : 1
+        const bDiff = isMissing || row.changed_fields.includes(b) ? 0 : 1
+        if (aDiff !== bDiff) return aDiff - bDiff
+        return fields.indexOf(a) - fields.indexOf(b)
+      })
+    } // 'sap' keeps original SAP Dictionary sequence from `fields`
+
+    return result
+  }, [fields, descriptions, matrixSearch, filterMode, sortOrder, isMissing, row.changed_fields])
+
   return <details className={`compare-record ${row.status}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="compare-record-head"><div className="compare-record-title"><span className={`status-tag ${row.status}`}>{status.toUpperCase()}</span>
       <strong title={Object.keys(row.key).map(field => `${field}${descriptions[field] ? ` (${descriptions[field]})` : ''}`).join(' · ')}>{Object.entries(row.key).map(([field, value]) => `${field}: ${value}`).join(' · ')}</strong></div>
-      <div className="compare-record-counts"><span className="same-count"><CheckCircle2 size={14} /> {isMissing ? 0 : fields.length - different} sama</span>
-        <span className="different-count"><AlertTriangle size={14} /> {different} {isMissing ? 'tanpa pasangan' : 'berbeda'}</span><ChevronDown size={16} /></div></summary>
-    <div className="compare-matrix-wrap"><table className="compare-matrix"><thead><tr><th>Kolom tabel</th><th>{leftLabel}</th><th>{rightLabel}</th><th>Status</th></tr></thead>
-      <tbody>{fields.map(field => {
+      <div className="compare-record-counts"><span className="same-count"><CheckCircle2 size={14} /> {isMissing ? 0 : fields.length - differentCount} sama</span>
+        <span className="different-count"><AlertTriangle size={14} /> {differentCount} {isMissing ? 'tanpa pasangan' : 'berbeda'}</span><ChevronDown size={16} /></div></summary>
+    <div className="compare-matrix-wrap">
+      <div className="matrix-toolbar">
+        <div className="matrix-search-box">
+          <Search size={13} />
+          <input
+            placeholder="Cari kolom…"
+            value={matrixSearch}
+            onChange={e => setMatrixSearch(e.target.value)}
+          />
+        </div>
+        <div className="matrix-toolbar-right">
+          <div className="matrix-filter-group">
+            <button
+              type="button"
+              className={`matrix-filter-btn ${filterMode === 'all' ? 'active' : ''}`}
+              onClick={() => setFilterMode('all')}
+            >
+              Semua <span className="matrix-filter-count">{fields.length}</span>
+            </button>
+            <button
+              type="button"
+              className={`matrix-filter-btn diff ${filterMode === 'different' ? 'active' : ''}`}
+              onClick={() => setFilterMode('different')}
+            >
+              Berbeda <span className="matrix-filter-count">{differentCount}</span>
+            </button>
+            <button
+              type="button"
+              className={`matrix-filter-btn same ${filterMode === 'same' ? 'active' : ''}`}
+              onClick={() => setFilterMode('same')}
+            >
+              Sama <span className="matrix-filter-count">{isMissing ? 0 : fields.length - differentCount}</span>
+            </button>
+          </div>
+          <div className="matrix-sort-group">
+            <span>Urut:</span>
+            <select
+              value={sortOrder}
+              onChange={e => setSortOrder(e.target.value as 'sap' | 'az' | 'diff_first')}
+            >
+              <option value="sap">Urutan SAP</option>
+              <option value="diff_first">Berbeda Duluan</option>
+              <option value="az">A - Z</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <table className="compare-matrix"><thead><tr><th>Kolom tabel</th><th>{leftLabel}</th><th>{rightLabel}</th><th>Status</th></tr></thead>
+      <tbody>{filteredSortedFields.map(field => {
         const fieldDiffers = isMissing || row.changed_fields.includes(field)
         return <tr className={fieldDiffers ? 'different' : 'same'} key={field}><th scope="row"><FieldName field={{ name: field, description: descriptions[field], data_type: '', is_key: false }} /></th>
           <td className={!row.left ? 'missing' : ''}>{row.left ? compareValue(row.left[field]) : 'Tidak ada baris'}</td>
           <td className={!row.right ? 'missing' : ''}>{row.right ? compareValue(row.right[field]) : 'Tidak ada baris'}</td>
           <td><span className={`matrix-status ${fieldDiffers ? 'different' : 'same'}`}>{fieldDiffers ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}{isMissing ? 'Tanpa pasangan' : fieldDiffers ? 'Berbeda' : 'Sama'}</span></td></tr>
-      })}</tbody></table></div></details>
+      })}
+      {!filteredSortedFields.length && (
+        <tr>
+          <td colSpan={4} style={{ textAlign: 'center', padding: '24px', color: '#8898aa', fontSize: '12px' }}>
+            Tidak ada kolom yang cocok dengan pencarian atau filter status ini.
+          </td>
+        </tr>
+      )}</tbody></table></div></details>
 }
 type TableNodeData = Record<string, unknown> & {
   alias: string
@@ -177,6 +270,10 @@ function App() {
   const [variantName, setVariantName] = useState('')
   const [variants, setVariants] = useState<Variant[]>([])
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
+  const [resultPage, setResultPage] = useState(1)
+  const [resultPageSize, setResultPageSize] = useState(25)
+  const [resultSortCol, setResultSortCol] = useState<string | null>(null)
+  const [resultSortDir, setResultSortDir] = useState<'asc' | 'desc'>('asc')
   const [pivotOpen, setPivotOpen] = useState(false)
   const [pivotIndex, setPivotIndex] = useState('')
   const [pivotColumn, setPivotColumn] = useState('')
@@ -230,6 +327,8 @@ function App() {
   const [structureKeys, setStructureKeys] = useState<Record<string, string>>({})
   const [structureLoading, setStructureLoading] = useState<Record<string, boolean>>({})
   const [fieldSearch, setFieldSearch] = useState<Record<string, string>>({})
+  const [fieldFilterMode, setFieldFilterMode] = useState<Record<string, 'all' | 'selected' | 'keys'>>({})
+  const [fieldSortOrder, setFieldSortOrder] = useState<Record<string, 'sap' | 'az' | 'selected_first' | 'keys_first'>>({})
   const [fieldText, setFieldText] = useState<Record<string, string>>({})
   const [confirmModal, setConfirmModal] = useState<{
     open: boolean
@@ -1017,6 +1116,27 @@ function App() {
     })),
   [data.columns, visibleColumns, resultDescriptions])
 
+  const sortedResultRows = useMemo(() => {
+    if (!resultSortCol) return data.rows
+    return [...data.rows].sort((a, b) => {
+      const valA = a[resultSortCol] ?? ''
+      const valB = b[resultSortCol] ?? ''
+      if (typeof valA === 'number' && typeof valB === 'number') {
+        return resultSortDir === 'asc' ? valA - valB : valB - valA
+      }
+      const strA = String(valA)
+      const strB = String(valB)
+      return resultSortDir === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA)
+    })
+  }, [data.rows, resultSortCol, resultSortDir])
+
+  const paginatedResultRows = useMemo(() => {
+    const start = (resultPage - 1) * resultPageSize
+    return sortedResultRows.slice(start, start + resultPageSize)
+  }, [sortedResultRows, resultPage, resultPageSize])
+
+  const totalResultPages = Math.max(1, Math.ceil(data.rows.length / resultPageSize))
+
   const flowEdges = useMemo(() => query.joins.flatMap((join, index) => {
     const conditions = relationConditions(join)
     return conditions.map((condition, conditionIndex) => ({
@@ -1243,14 +1363,82 @@ function App() {
             <p className="field-selection-intro">Kolom <strong>Tampil</strong> masuk hasil laporan. Kolom <strong>Filter</strong> menjadi parameter saat menjalankan query.</p>
             <div className="field-selection-grid">{query.sources.filter(source => source.table_name).map(source => {
               const sourceIndex = query.sources.findIndex(item => item.alias === source.alias)
-              const fields = metadataFor(source)
+              const rawFields = metadataFor(source)
               const term = (fieldSearch[source.alias] || '').toUpperCase()
+              const currentFilter = fieldFilterMode[source.alias] || 'all'
+              const currentSort = fieldSortOrder[source.alias] || 'sap'
+
+              let fields = rawFields.filter(field => {
+                const desc = (field.description || '').toUpperCase()
+                return !term || field.name.includes(term) || desc.includes(term) || field.data_type.toUpperCase().includes(term)
+              })
+
+              if (currentFilter === 'selected') {
+                fields = fields.filter(f => source.fields.includes(f.name) || source.filters.some(flt => flt.field === f.name))
+              } else if (currentFilter === 'keys') {
+                fields = fields.filter(f => f.is_key)
+              }
+
+              if (currentSort === 'az') {
+                fields = [...fields].sort((a, b) => a.name.localeCompare(b.name))
+              } else if (currentSort === 'selected_first') {
+                fields = [...fields].sort((a, b) => {
+                  const aSel = source.fields.includes(a.name) || source.filters.some(flt => flt.field === a.name) ? 0 : 1
+                  const bSel = source.fields.includes(b.name) || source.filters.some(flt => flt.field === b.name) ? 0 : 1
+                  if (aSel !== bSel) return aSel - bSel
+                  return rawFields.indexOf(a) - rawFields.indexOf(b)
+                })
+              } else if (currentSort === 'keys_first') {
+                fields = [...fields].sort((a, b) => {
+                  const aKey = a.is_key ? 0 : 1
+                  const bKey = b.is_key ? 0 : 1
+                  if (aKey !== bKey) return aKey - bKey
+                  return rawFields.indexOf(a) - rawFields.indexOf(b)
+                })
+              }
+
               return <div className="field-selection-table" key={source.alias}><div className="field-selection-title"><strong>{source.table_name}</strong>
                 <span>{source.fields.length} tampil · {source.filters.length} filter</span></div>
                 <input placeholder="Cari kolom…" value={fieldSearch[source.alias] || ''}
                   onChange={e => setFieldSearch(current => ({ ...current, [source.alias]: e.target.value }))} />
+                <div className="field-selection-controls">
+                  <div className="field-filter-pills">
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${currentFilter === 'all' ? 'active' : ''}`}
+                      onClick={() => setFieldFilterMode(c => ({ ...c, [source.alias]: 'all' }))}
+                    >
+                      Semua
+                    </button>
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${currentFilter === 'selected' ? 'active' : ''}`}
+                      onClick={() => setFieldFilterMode(c => ({ ...c, [source.alias]: 'selected' }))}
+                    >
+                      Dipilih ({source.fields.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${currentFilter === 'keys' ? 'active' : ''}`}
+                      onClick={() => setFieldFilterMode(c => ({ ...c, [source.alias]: 'keys' }))}
+                    >
+                      Key
+                    </button>
+                  </div>
+                  <select
+                    className="field-sort-select"
+                    value={currentSort}
+                    onChange={e => setFieldSortOrder(c => ({ ...c, [source.alias]: e.target.value as any }))}
+                    title="Urutan kolom"
+                  >
+                    <option value="sap">Urutan SAP</option>
+                    <option value="selected_first">Dipilih Duluan</option>
+                    <option value="keys_first">Key Duluan</option>
+                    <option value="az">A - Z</option>
+                  </select>
+                </div>
                 <div className="field-selection-head"><span>Kolom</span><span>Tampil</span><span>Filter</span></div>
-                <div className="field-selection-list">{fields.filter(field => field.name.includes(term)).map(field => {
+                <div className="field-selection-list">{fields.map(field => {
                   const selectedFilter = source.filters.some(filter => filter.field === field.name)
                   return <div className="field-selection-row" key={field.name}><span title={fieldTitle(field)}>
                     <FieldName field={field} showType />{field.is_key && <KeyRound size={11} className="key-icon" />}</span>
@@ -1264,7 +1452,7 @@ function App() {
                         ? [...source.filters, { field: field.name, operator: 'EQ', value: '' }]
                         : source.filters.filter(filter => filter.field !== field.name),
                       })} /></div>
-                })}{!fields.length && <div className="empty-small">Struktur tabel belum tersedia.</div>}</div>
+                })}{!fields.length && <div className="empty-small">{rawFields.length ? 'Tidak ada kolom cocok.' : 'Struktur tabel belum tersedia.'}</div>}</div>
                 {!fields.length && <input placeholder="Fallback: MATNR, MTART" value={fieldText[source.alias] ?? source.fields.join(', ')}
                   onChange={e => { setFieldText(current => ({ ...current, [source.alias]: e.target.value.toUpperCase() }))
                     updateSource(sourceIndex, { fields: e.target.value.toUpperCase().split(',').map(value => value.trim()).filter(Boolean) }) }} />}
@@ -1297,10 +1485,114 @@ function App() {
               <button className="button primary" onClick={runPivot} disabled={!pivotIndex || !pivotColumn || !pivotValue}>Terapkan</button></div>}
             {data.columns.length > 0 && <div className="column-picker"><span>Kolom:</span>{data.columns.map(c => <label key={c}><input type="checkbox" checked={visibleColumns.includes(c)}
               onChange={e => setVisibleColumns(v => e.target.checked ? [...v, c] : v.filter(x => x !== c))} /><span title={[c, resultDescriptions[c]].filter(Boolean).join(' · ')}>{c}{resultDescriptions[c] && <small className="inline-description">{resultDescriptions[c]}</small>}</span></label>)}</div>}
-            {data.rows.length ? <div className="ag-theme-quartz grid-wrap"><AgGridReact<Row> ref={gridRef} rowData={data.rows} columnDefs={columns}
-              suppressFieldDotNotation={true}
-              defaultColDef={{ filter: true, sortable: true, resizable: true }} pagination paginationPageSize={20} /></div>
-              : <div className="empty-state"><div className="empty-illustration"><Search size={27} /></div><strong>Belum ada hasil</strong><p>Pilih tabel, periksa join, tandai kolom tampil dan filter, lalu jalankan query.</p></div>}
+            {data.rows.length ? (
+              <div className="query-table-wrap">
+                <table className="report-matrix">
+                  <thead>
+                    <tr>
+                      <th className="row-idx">#</th>
+                      {data.columns.filter(c => visibleColumns.includes(c)).map(c => {
+                        const isSorted = resultSortCol === c
+                        return (
+                          <th
+                            key={c}
+                            onClick={() => {
+                              if (resultSortCol === c) {
+                                setResultSortDir(d => d === 'asc' ? 'desc' : 'asc')
+                              } else {
+                                setResultSortCol(c)
+                                setResultSortDir('asc')
+                              }
+                            }}
+                            title="Klik untuk mengurutkan data kolom ini"
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                              <span>
+                                <strong>{c}</strong>
+                                {resultDescriptions[c] && <span className="technical-description" style={{ marginLeft: '6px', fontSize: '10px' }}>{resultDescriptions[c]}</span>}
+                              </span>
+                              {isSorted && (
+                                <span style={{ fontSize: '10px', color: '#1d5cb4' }}>
+                                  {resultSortDir === 'asc' ? '▲' : '▼'}
+                                </span>
+                              )}
+                            </div>
+                          </th>
+                        )
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginatedResultRows.map((row, rowIdx) => {
+                      const absoluteIdx = (resultPage - 1) * resultPageSize + rowIdx + 1
+                      return (
+                        <tr key={rowIdx}>
+                          <th scope="row" className="row-idx">{absoluteIdx}</th>
+                          {data.columns.filter(c => visibleColumns.includes(c)).map(c => {
+                            const val = row[c]
+                            const isEmpty = val === null || val === undefined || val === ''
+                            return (
+                              <td key={c} className={isEmpty ? 'cell-empty' : ''}>
+                                {isEmpty ? '—' : String(val)}
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+                <div className="query-table-footer">
+                  <div>
+                    Menampilkan {data.rows.length === 0 ? 0 : (resultPage - 1) * resultPageSize + 1} – {Math.min(resultPage * resultPageSize, data.rows.length)} dari <strong>{data.rows.length}</strong> baris total
+                  </div>
+                  <div className="query-table-pagination">
+                    <span style={{ marginRight: '8px' }}>Baris per halaman:</span>
+                    <select
+                      style={{ height: '28px', fontSize: '10px', padding: '0 6px', marginRight: '12px' }}
+                      value={resultPageSize}
+                      onChange={e => {
+                        setResultPageSize(Number(e.target.value))
+                        setResultPage(1)
+                      }}
+                    >
+                      <option value={20}>20</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                      <option value={250}>250</option>
+                    </select>
+
+                    <button
+                      type="button"
+                      className="query-table-page-btn"
+                      disabled={resultPage <= 1}
+                      onClick={() => setResultPage(p => Math.max(1, p - 1))}
+                      title="Halaman sebelumnya"
+                    >
+                      ‹
+                    </button>
+                    <span style={{ padding: '0 8px', fontWeight: 700, color: '#25446a' }}>
+                      {resultPage} / {totalResultPages}
+                    </span>
+                    <button
+                      type="button"
+                      className="query-table-page-btn"
+                      disabled={resultPage >= totalResultPages}
+                      onClick={() => setResultPage(p => Math.min(totalResultPages, p + 1))}
+                      title="Halaman berikutnya"
+                    >
+                      ›
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-state">
+                <div className="empty-illustration"><Search size={27} /></div>
+                <strong>Belum ada hasil</strong>
+                <p>Pilih tabel, periksa join, tandai kolom tampil dan filter, lalu jalankan query.</p>
+              </div>
+            )}
             {activeReport && <div className="variant-bar"><span><Layers3 size={15} /> Variant layout</span>
               <select onChange={e => applyVariant(e.target.value)} defaultValue="">
                 <option value="">Pilih variant</option>{variants.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</select>
