@@ -472,6 +472,7 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
                     "name": name.upper(),
                     "is_key": bool(field.get("is_key") or field.get("key") or field.get("KEYFLAG") == "X"),
                     "data_type": str(field.get("data_type") or field.get("datatype") or field.get("DATATYPE") or ""),
+                    "description": str(next((field.get(k) for k in ("description", "DESCRIPTION", "field_description", "FIELD_DESCRIPTION", "fieldDescription", "field_text", "FIELD_TEXT", "fieldText", "FIELDTEXT", "DDTEXT", "SCRTEXT_L", "scrtext_l", "REPTEXT", "reptext", "label", "text") if field.get(k)), "")),
                     "check_table": str(field.get("check_table") or field.get("CHECKTABLE") or ""),
                     "position": int(position_value) if str(position_value).strip().isdigit() else None,
                 })
@@ -497,6 +498,7 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
                         "name": name,
                         "is_key": key_index >= 0 and key_index < len(cells) and cells[key_index].lower() in ("x", "yes", "true", "key"),
                         "data_type": cells[type_index] if type_index >= 0 and type_index < len(cells) else "",
+                        "description": next((cells[i] for i, h in enumerate(headers) if h in ("description", "field description", "field text", "label", "text", "ddtext") and i < len(cells)), ""),
                         "check_table": "",
                         "position": int(cells[position_index]) if position_index >= 0 and position_index < len(cells) and cells[position_index].isdigit() else None,
                     })
@@ -527,6 +529,22 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
                        for row in positions if str(row.get("POSITION", "")).strip().isdigit()}
             for field in fields:
                 field["position"] = field.get("position") or by_name.get(field["name"])
+        except (HTTPException, ValueError, KeyError):
+            pass
+    if any(not field.get("description") for field in fields):
+        try:
+            texts = await read_rows(ReadIn(
+                target=str(target["id"]), table_name="DD03T", fields=["FIELDNAME", "DDTEXT", "DDLANGUAGE"],
+                filters=[FilterIn(field="TABNAME", value=table_name.upper())], rowcount=1000,
+            ), token)
+            by_name: dict[str, str] = {}
+            for row in sorted(texts, key=lambda item: str(item.get("DDLANGUAGE", "")) != "E"):
+                name = str(row.get("FIELDNAME", "")).upper()
+                description = str(row.get("DDTEXT", "")).strip()
+                if name and description and name not in by_name:
+                    by_name[name] = description
+            for field in fields:
+                field["description"] = field.get("description") or by_name.get(field["name"], "")
         except (HTTPException, ValueError, KeyError):
             pass
     fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))

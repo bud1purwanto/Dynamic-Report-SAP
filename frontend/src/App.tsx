@@ -36,7 +36,13 @@ type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
 type ReportRun = { id: string; report_id: string | null; status: string; row_count: number; has_artifact: boolean;
   error: string | null; started_at: string }
-type StructureField = { name: string; is_key: boolean; data_type: string; check_table?: string }
+type StructureField = { name: string; is_key: boolean; data_type: string; description?: string; check_table?: string }
+function fieldTitle(field: StructureField): string {
+  return [field.name, field.description, field.data_type].filter(Boolean).join(' · ')
+}
+function FieldName({ field, showType = false }: { field: StructureField; showType?: boolean }) {
+  return <span className="technical-field" title={fieldTitle(field)}><strong>{field.name}</strong>{field.description && <span className="technical-description">{field.description}</span>}{showType && field.data_type && <small>{field.data_type}</small>}</span>
+}
 type CompareRow = { key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }
 
 function compareValue(value: unknown): string {
@@ -44,8 +50,8 @@ function compareValue(value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value) : String(value)
 }
 
-function ComparisonMatrix({ row, fields, leftLabel, rightLabel, defaultOpen }: {
-  row: CompareRow; fields: string[]; leftLabel: string; rightLabel: string; defaultOpen: boolean
+function ComparisonMatrix({ row, fields, descriptions, leftLabel, rightLabel, defaultOpen }: {
+  row: CompareRow; fields: string[]; descriptions: Record<string, string>; leftLabel: string; rightLabel: string; defaultOpen: boolean
 }) {
   const [expanded, setExpanded] = useState(defaultOpen)
   const isMissing = !row.left || !row.right
@@ -54,13 +60,13 @@ function ComparisonMatrix({ row, fields, leftLabel, rightLabel, defaultOpen }: {
     : row.status === 'only_left' ? 'Hanya sumber' : 'Hanya pembanding'
   return <details className={`compare-record ${row.status}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="compare-record-head"><div className="compare-record-title"><span className={`status-tag ${row.status}`}>{status.toUpperCase()}</span>
-      <strong>{Object.entries(row.key).map(([field, value]) => `${field}: ${value}`).join(' · ')}</strong></div>
+      <strong title={Object.keys(row.key).map(field => `${field}${descriptions[field] ? ` (${descriptions[field]})` : ''}`).join(' · ')}>{Object.entries(row.key).map(([field, value]) => `${field}: ${value}`).join(' · ')}</strong></div>
       <div className="compare-record-counts"><span className="same-count"><CheckCircle2 size={14} /> {isMissing ? 0 : fields.length - different} sama</span>
         <span className="different-count"><AlertTriangle size={14} /> {different} {isMissing ? 'tanpa pasangan' : 'berbeda'}</span><ChevronDown size={16} /></div></summary>
     <div className="compare-matrix-wrap"><table className="compare-matrix"><thead><tr><th>Kolom tabel</th><th>{leftLabel}</th><th>{rightLabel}</th><th>Status</th></tr></thead>
       <tbody>{fields.map(field => {
         const fieldDiffers = isMissing || row.changed_fields.includes(field)
-        return <tr className={fieldDiffers ? 'different' : 'same'} key={field}><th scope="row">{field}</th>
+        return <tr className={fieldDiffers ? 'different' : 'same'} key={field}><th scope="row"><FieldName field={{ name: field, description: descriptions[field], data_type: '', is_key: false }} /></th>
           <td className={!row.left ? 'missing' : ''}>{row.left ? compareValue(row.left[field]) : 'Tidak ada baris'}</td>
           <td className={!row.right ? 'missing' : ''}>{row.right ? compareValue(row.right[field]) : 'Tidak ada baris'}</td>
           <td><span className={`matrix-status ${fieldDiffers ? 'different' : 'same'}`}>{fieldDiffers ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}{isMissing ? 'Tanpa pasangan' : fieldDiffers ? 'Berbeda' : 'Sama'}</span></td></tr>
@@ -98,13 +104,13 @@ function TableNode({ id, data }: NodeProps<TableFlowNode>) {
     {linkedFields.length > 0 && <div className="table-node-relations nodrag"><div className="table-node-relations-label">RELASI AKTIF <span>{linkedFields.length}</span></div>
       {linkedFields.map(field => <div className="table-node-relation" key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
-        <GitCompareArrows size={12} /><span>{field.name}</span><small>{field.data_type}</small>
+        <GitCompareArrows size={12} /><FieldName field={field} />
         <Handle type="source" position={Position.Right} id={field.name} />
       </div>)}</div>}
     <div className="table-node-fields nowheel nodrag" onScroll={() => updateNodeInternals(id)}>
       {visibleFields.length ? visibleFields.map(field => <div className="table-node-field" key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
-        <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
+        <span title={fieldTitle(field)}><FieldName field={field} />{field.is_key && <KeyRound size={11} className="key-icon" />}</span>
         <Handle type="source" position={Position.Right} id={field.name} />
       </div>) : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : linkedFields.length ? 'Semua kolom sudah menjadi relasi aktif' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
     </div>
@@ -996,18 +1002,20 @@ function App() {
     })
   }
 
+  const resultDescriptions = useMemo(() => Object.fromEntries(query.sources.flatMap(source => (structureFields[source.alias] || []).map(field => [`${source.alias}.${field.name}`, field.description || '']))), [query.sources, structureFields])
   const columns = useMemo<ColDef<Row>[]>(() => data.columns
     .filter(c => visibleColumns.includes(c))
     .map(c => ({
       field: c,
-      headerName: c,
+      headerName: resultDescriptions[c] ? `${c} · ${resultDescriptions[c]}` : c,
+      headerTooltip: [c, resultDescriptions[c]].filter(Boolean).join(' · '),
       valueGetter: params => params.data?.[c],
       minWidth: 150,
       filter: true,
       sortable: true,
       resizable: true,
     })),
-  [data.columns, visibleColumns])
+  [data.columns, visibleColumns, resultDescriptions])
 
   const flowEdges = useMemo(() => query.joins.flatMap((join, index) => {
     const conditions = relationConditions(join)
@@ -1185,6 +1193,8 @@ function App() {
               <small className="metadata-status">{structureLoading[source.alias] ? 'Memuat struktur tabel…' :
                 metadataFor(source).length ? `${metadataFor(source).length} kolom tersedia di canvas` :
                   'Isi nama tabel; kolom akan dimuat otomatis.'}</small>
+              {metadataFor(source).length > 0 && !metadataFor(source).some(field => field.description) &&
+                <small className="metadata-status">Teks deskripsi kolom tidak tersedia dari SAP untuk tabel ini.</small>}
               <button className="text-button structure-button" onClick={() => inspectTable(source)}
                 disabled={!source.table_name || !query.target || busy}><Search size={14} /> Muat ulang struktur</button>
               {structureText[source.alias] && !metadataFor(source).length &&
@@ -1202,11 +1212,11 @@ function App() {
                     <select value={condition.left_field} onChange={e => setJoinConditions(index - 1,
                       conditions.map((item, i) => i === conditionIndex ? { ...item, left_field: e.target.value } : item))}>
                       <option value="">Field kiri</option>{metadataFor(query.sources.find(item => item.alias === query.joins[index - 1].left_alias) || query.sources[0]).map(field =>
-                        <option key={field.name} value={field.name}>{field.name}</option>)}</select>
+                        <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select>
                     <span>=</span><select value={condition.right_field} onChange={e => setJoinConditions(index - 1,
                       conditions.map((item, i) => i === conditionIndex ? { ...item, right_field: e.target.value } : item))}>
                       <option value="">Field kanan</option>{metadataFor(source).map(field =>
-                        <option key={field.name} value={field.name}>{field.name}</option>)}</select>
+                        <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select>
                     <button className="icon-button" title="Hapus kondisi join" onClick={() => setJoinConditions(index - 1,
                       conditions.filter((_, i) => i !== conditionIndex))}><Trash2 size={13} /></button></div>)}
                 <button className="text-button" onClick={() => {
@@ -1242,8 +1252,8 @@ function App() {
                 <div className="field-selection-head"><span>Kolom</span><span>Tampil</span><span>Filter</span></div>
                 <div className="field-selection-list">{fields.filter(field => field.name.includes(term)).map(field => {
                   const selectedFilter = source.filters.some(filter => filter.field === field.name)
-                  return <div className="field-selection-row" key={field.name}><span title={field.data_type}>
-                    {field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}<small>{field.data_type}</small></span>
+                  return <div className="field-selection-row" key={field.name}><span title={fieldTitle(field)}>
+                    <FieldName field={field} showType />{field.is_key && <KeyRound size={11} className="key-icon" />}</span>
                     <input type="checkbox" aria-label={`Tampilkan ${source.table_name}.${field.name}`}
                       checked={source.fields.includes(field.name)} onChange={e => updateSource(sourceIndex, {
                         fields: e.target.checked ? [...source.fields, field.name] : source.fields.filter(name => name !== field.name),
@@ -1262,7 +1272,7 @@ function App() {
             })}</div>
             {query.sources.some(source => source.filters.length) && <div className="parameter-panel"><strong>Nilai parameter</strong><small>Parameter kosong tidak membatasi hasil.</small>
               {query.sources.flatMap((source, sourceIndex) => source.filters.map((filter, filterIndex) =>
-                <div className="parameter-row" key={`${source.alias}-${filter.field}`}><span>{source.table_name}.{filter.field}</span>
+                <div className="parameter-row" key={`${source.alias}-${filter.field}`}><span title={metadataFor(source).find(field => field.name === filter.field)?.description || ''}>{source.table_name}.{filter.field}{metadataFor(source).find(field => field.name === filter.field)?.description && <small className="inline-description">{metadataFor(source).find(field => field.name === filter.field)?.description}</small>}</span>
                   <select value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}>
                     {['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
                   <input placeholder="Nilai filter (opsional)" value={filter.value}
@@ -1280,13 +1290,13 @@ function App() {
               <input className="formula-input" placeholder="Contoh: [T1.NETWR] * 1.11" value={formulaExpression} onChange={e => setFormulaExpression(e.target.value)} />
               <button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaExpression}>Terapkan</button></div>}
             {pivotOpen && <div className="pivot-panel"><div className="pivot-title"><Settings2 size={16} /> Pivot data</div>
-              <select value={pivotIndex} onChange={e => setPivotIndex(e.target.value)}><option value="">Key / index</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
-              <select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Nama kolom baru</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
-              <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Nilai</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
+              <select value={pivotIndex} onChange={e => setPivotIndex(e.target.value)}><option value="">Key / index</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
+              <select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Nama kolom baru</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
+              <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Nilai</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
               <select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}><option value="first">Nilai pertama</option><option value="sum">Jumlah</option><option value="count">Hitung</option><option value="min">Minimum</option><option value="max">Maksimum</option></select>
               <button className="button primary" onClick={runPivot} disabled={!pivotIndex || !pivotColumn || !pivotValue}>Terapkan</button></div>}
             {data.columns.length > 0 && <div className="column-picker"><span>Kolom:</span>{data.columns.map(c => <label key={c}><input type="checkbox" checked={visibleColumns.includes(c)}
-              onChange={e => setVisibleColumns(v => e.target.checked ? [...v, c] : v.filter(x => x !== c))} />{c}</label>)}</div>}
+              onChange={e => setVisibleColumns(v => e.target.checked ? [...v, c] : v.filter(x => x !== c))} /><span title={[c, resultDescriptions[c]].filter(Boolean).join(' · ')}>{c}{resultDescriptions[c] && <small className="inline-description">{resultDescriptions[c]}</small>}</span></label>)}</div>}
             {data.rows.length ? <div className="ag-theme-quartz grid-wrap"><AgGridReact<Row> ref={gridRef} rowData={data.rows} columnDefs={columns}
               suppressFieldDotNotation={true}
               defaultColDef={{ filter: true, sortable: true, resizable: true }} pagination paginationPageSize={20} /></div>
@@ -1358,14 +1368,15 @@ function App() {
             <div className="compare-options"><label>Tabel<div className="compare-table-picker"><input placeholder="MARA" value={compareTable} onChange={e => { setCompareTable(e.target.value.toUpperCase()); setCompareFilters([]) }} /><button className="button subtle" onClick={() => openTableCatalog(undefined, 'compare')} disabled={!compareTarget} title="Cari di katalog tabel SAP"><BookOpen size={14} /> Katalog</button></div></label>
               <p>Semua field tabel dibandingkan. Key baris diambil otomatis dari struktur SAP pada kedua server.</p></div>
             <div className="compare-field-panel"><div className="compare-field-heading"><div><strong>Kolom tabel</strong><small>Pilih kolom untuk dijadikan parameter filter. Semua kolom tetap dibandingkan.</small></div><input placeholder="Cari kolom…" value={compareFieldSearch} onChange={e => setCompareFieldSearch(e.target.value.toUpperCase())} disabled={!compareMetadata.length} /></div>
+              {compareMetadata.length > 0 && !compareMetadata.some(field => field.description) && <span className="metadata-status">Teks deskripsi kolom tidak tersedia dari SAP untuk tabel ini.</span>}
               {compareMetadataLoading ? <span className="metadata-status">Memuat kolom tabel…</span> : compareMetadataError ? <span className="metadata-status">{compareMetadataError}</span> : compareMetadata.length ? <div className="compare-field-list">{compareMetadata.filter(field => field.name.includes(compareFieldSearch) || field.data_type.toUpperCase().includes(compareFieldSearch)).map(field => {
                 const selected = compareFilters.some(filter => filter.field === field.name)
                 return <label className="compare-field-choice" key={field.name}><input type="checkbox" checked={selected} disabled={!selected && compareFilters.length >= 10} onChange={e => setCompareFilters(current => e.target.checked ? [...current, { field: field.name, operator: 'EQ', value: '' }] : current.filter(filter => filter.field !== field.name))} />
-                  <span>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small></label>
+                  <FieldName field={field} showType />{field.is_key && <KeyRound size={11} className="key-icon" />}</label>
               })}</div> : <span className="metadata-status">Isi nama tabel untuk melihat kolomnya.</span>}</div>
             <div className="compare-settings"><label>Batas baris per server<input type="number" min={1} max={1000} value={compareRowcount} onChange={e => setCompareRowcount(Number(e.target.value))} /></label>
               <div className="compare-filter-panel"><div className="filter-heading"><span>PARAMETER FILTER (BERLAKU UNTUK KEDUA SERVER)</span></div>
-                {compareFilters.map((filter, index) => <div className="filter-row" key={filter.field}><strong>{filter.field}</strong>
+                {compareFilters.map((filter, index) => <div className="filter-row" key={filter.field}><strong title={compareMetadata.find(field => field.name === filter.field)?.description || ''}>{filter.field}{compareMetadata.find(field => field.name === filter.field)?.description && <small className="inline-description">{compareMetadata.find(field => field.name === filter.field)?.description}</small>}</strong>
                   <select value={filter.operator} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, operator: e.target.value } : item))}>{['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
                   <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
                   <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}
@@ -1386,7 +1397,7 @@ function App() {
             {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
               <div className="compare-tabs">{([['all', 'Semua Record', compareRows.length], ['same', 'Record Identik', compareRows.filter(row => row.status === 'same').length], ['different', 'Record Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
             {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="compare-record-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) =>
-              <ComparisonMatrix key={Object.values(row.key).join('|')} row={row} fields={compareResult.fields}
+              <ComparisonMatrix key={Object.values(row.key).join('|')} row={row} fields={compareResult.fields} descriptions={Object.fromEntries(compareMetadata.map(field => [field.name, field.description || '']))}
                 leftLabel={servers.find(server => server.id === compareTarget)?.label || 'Server sumber'}
                 rightLabel={servers.find(server => server.id === otherTarget)?.label || 'Server pembanding'}
                 defaultOpen={compareRows.length <= 2 || (i === 0 && compareView === 'different')} />)}</div>
@@ -1617,10 +1628,10 @@ function App() {
               <option value="left">LEFT JOIN</option><option value="inner">INNER JOIN</option></select></label>
             <div className="relation-modal-fields"><label>Field sumber<select value={editingCondition.left_field} onChange={event => changeRelationField({ left_field: event.target.value })}>
               {!editingLeftFields.some(field => field.name === editingCondition.left_field) && <option value={editingCondition.left_field}>{editingCondition.left_field}</option>}
-              {editingLeftFields.map(field => <option key={field.name} value={field.name}>{field.name}</option>)}</select></label>
+              {editingLeftFields.map(field => <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select></label>
               <span>=</span><label>Field tujuan<select value={editingCondition.right_field} onChange={event => changeRelationField({ right_field: event.target.value })}>
                 {!editingRightFields.some(field => field.name === editingCondition.right_field) && <option value={editingCondition.right_field}>{editingCondition.right_field}</option>}
-                {editingRightFields.map(field => <option key={field.name} value={field.name}>{field.name}</option>)}</select></label></div>
+                {editingRightFields.map(field => <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select></label></div>
             <small>Perubahan langsung diterapkan pada canvas dan query.</small></div>
           <div className="modal-actions relation-modal-actions"><button className="button danger" onClick={deleteRelationField}><Trash2 size={14} /> {relationConditions(editingJoin).length === 1 ? 'Hapus relasi' : 'Hapus kondisi'}</button>
             <button className="button primary" onClick={() => setRelationModal(null)}>Selesai</button></div>

@@ -24,7 +24,7 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "read_rows", AsyncMock(return_value=positions)) as read:
             fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
         self.assertEqual([field["name"] for field in fields], ["AA_FIELD", "ZZ_FIELD"])
-        self.assertEqual(read.call_args.args[0].table_name, "DD03L")
+        self.assertIn("DD03L", [call.args[0].table_name for call in read.await_args_list])
 
     async def test_structure_uses_positions_already_supplied_by_gateway(self):
         structure = {"structuredContent": {"fields": [
@@ -34,7 +34,20 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "read_rows", AsyncMock()) as read:
             fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
         self.assertEqual([field["name"] for field in fields], ["A_FIELD", "Z_FIELD"])
-        read.assert_not_awaited()
+        self.assertNotIn("DD03L", [call.args[0].table_name for call in read.await_args_list])
+
+    async def test_structure_uses_gateway_text_then_dd03t_fallback(self):
+        structure = {"structuredContent": {"fields": [
+            {"name": "MATNR", "position": 1, "description": "Material Number"},
+            {"name": "MTART", "position": 2},
+        ]}}
+        texts = [{"FIELDNAME": "MATNR", "DDTEXT": "Different text"},
+                 {"FIELDNAME": "MTART", "DDTEXT": "Material Type"}]
+        with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
+             patch.object(main, "read_rows", AsyncMock(return_value=texts)) as read:
+            fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
+        self.assertEqual([field["description"] for field in fields], ["Material Number", "Material Type"])
+        self.assertEqual(read.await_args.args[0].table_name, "DD03T")
 
     async def test_user_catalog_only_returns_user_connections(self):
         resources = [
