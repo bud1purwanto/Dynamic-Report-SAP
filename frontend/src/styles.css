@@ -41,6 +41,18 @@ label small{font-size:11px;color:#9ba8b7;font-weight:500}
 .key-icon{display:inline-block;vertical-align:-1px;margin-right:4px;color:#d97706;flex:none}
 .text-button{display:flex;align-items:center;gap:5px;border:0;background:transparent;color:#3a70ca;font-size:12px;font-weight:700}
 .alert{padding:11px 14px;border-radius:9px;font-size:12px;margin-bottom:15px}.alert.error{color:#a83d4a;background:#fff0f1;border:1px solid #f5cfd3}.alert.success{color:#297252;background:#e9f8f0;border:1px solid #bee7d0}.alert.dismiss{display:flex;justify-content:space-between;cursor:pointer}
+.toast-container{position:fixed;bottom:24px;right:24px;z-index:99999;display:flex;flex-direction:column-reverse;gap:10px;pointer-events:none;max-width:min(420px,calc(100vw - 32px))}
+.toast{pointer-events:auto;display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border-radius:12px;background:#fff;box-shadow:0 12px 32px rgba(15,31,56,.18),0 2px 6px rgba(15,31,56,.06),0 0 0 1px rgba(220,230,242,.9);font-size:12px;line-height:1.5;animation:toastIn .22s cubic-bezier(.16,1,.3,1);transition:all .2s ease}
+@keyframes toastIn{from{opacity:0;transform:translateY(16px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+.toast-icon-wrap{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;flex:none;margin-top:1px}
+.toast.success .toast-icon-wrap{background:#e8f8f0;color:#228658}
+.toast.error .toast-icon-wrap{background:#feecee;color:#d33849}
+.toast.info .toast-icon-wrap{background:#eaf2ff;color:#2d6ec9}
+.toast-content{display:grid;gap:2px;flex:1;min-width:0}
+.toast-title{font-size:12px;font-weight:700;color:#1c304e}
+.toast-desc{font-size:11px;color:#5a6e88;word-break:break-word}
+.toast-close{display:grid;place-items:center;width:22px;height:22px;border:0;background:transparent;border-radius:6px;color:#8fa0b5;cursor:pointer;flex:none;padding:0;transition:all .15s ease}
+.toast-close:hover{background:#edf2f9;color:#27436b}
 .loading-screen{height:100vh;display:flex;align-items:center;justify-content:center;gap:12px;color:#4162a0;font-weight:700}.spinner{width:20px;height:20px;border:2px solid #c7d6ee;border-top-color:#376dcc;border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
 .login-shell{display:grid;grid-template-columns:46% 54%;min-height:100vh;background:#fff}.login-aside{display:flex;flex-direction:column;justify-content:space-between;padding:64px 10%;background:radial-gradient(circle at 90% 0%,#467dd7 0,#254d99 35%,#102c60 100%);color:#fff;overflow:hidden;position:relative}
 .login-aside:after{content:'';position:absolute;width:530px;height:530px;border:1px solid #ffffff25;border-radius:50%;right:-150px;bottom:-270px;box-shadow:0 0 0 70px #ffffff08,0 0 0 150px #ffffff05}

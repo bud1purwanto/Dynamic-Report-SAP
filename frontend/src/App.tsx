@@ -4,7 +4,7 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  AlertTriangle, ArrowRight, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
+  AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
   Edit2, GitCompareArrows, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
   Settings2, ShieldCheck, Table2, Trash2, X,
 } from 'lucide-react'
@@ -31,6 +31,7 @@ type CompareVariant = {
   }
 }
 type Tab = 'builder' | 'compare' | 'credentials' | 'schedules'
+type Toast = { id: string; type: 'success' | 'error' | 'info'; message: string; title?: string }
 type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
 type ReportRun = { id: string; report_id: string | null; status: string; row_count: number; has_artifact: boolean;
@@ -132,8 +133,31 @@ function App() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const [error, setErrorState] = useState('')
+  const [notice, setNoticeState] = useState('')
+  const [toasts, setToasts] = useState<Toast[]>([])
+
+  const removeToast = (id: string) => {
+    setToasts(current => current.filter(t => t.id !== id))
+  }
+
+  const pushToast = (toast: Omit<Toast, 'id'>) => {
+    const id = Math.random().toString(36).substring(2, 9)
+    setToasts(current => [...current, { ...toast, id }])
+    window.setTimeout(() => {
+      setToasts(current => current.filter(t => t.id !== id))
+    }, toast.type === 'error' ? 5000 : 3500)
+  }
+
+  const setError = (msg: string) => {
+    setErrorState(msg)
+    if (msg) pushToast({ type: 'error', message: msg, title: 'Terjadi Kesalahan' })
+  }
+
+  const setNotice = (msg: string) => {
+    setNoticeState(msg)
+    if (msg) pushToast({ type: 'success', message: msg, title: 'Berhasil' })
+  }
   const [tab, setTab] = useState<Tab>('builder')
   const [servers, setServers] = useState<Server[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
@@ -227,7 +251,12 @@ function App() {
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
   const compareResultRef = useRef<HTMLDivElement>(null)
+  const queryResultRef = useRef<HTMLDivElement>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
+
+  function scrollToTop() {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   async function openTableCatalog(targetIndex?: number, mode: 'builder' | 'compare' = 'builder') {
     setCatalogModal({ open: true, targetIndex, mode })
@@ -607,6 +636,9 @@ function App() {
       setData(result); setVisibleColumns(result.columns)
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
         (result.warnings?.length ? ` · ${result.warnings.join(' ')}` : ''))
+      window.setTimeout(() => {
+        queryResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 100)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
@@ -1097,8 +1129,6 @@ function App() {
         </div>
       </header>
       <div className="content">
-        {error && <div className="alert error dismiss" onClick={() => setError('')}>{error}<span>×</span></div>}
-        {notice && <div className="alert success dismiss" onClick={() => setNotice('')}>{notice}<span>×</span></div>}
         {tab === 'builder' && <>
           <div className="page-heading"><div><span className="eyebrow">REPORT DESIGNER</span><h1>Query Builder</h1>
             <p>Susun sumber data SAP, hubungkan tabel, lalu lihat hasilnya.</p></div>
@@ -1238,10 +1268,13 @@ function App() {
                   <input placeholder="Nilai filter (opsional)" value={filter.value}
                     onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })} /></div>))}</div>}
           </section>
-          <section className="card results-card"><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
-            <div className="results-actions"><button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!data.rows.length}><Plus size={16} /> Formula</button>
+          <section className="card results-card" ref={queryResultRef}><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
+            <div className="results-actions">
+              <button className="button subtle" onClick={scrollToTop} title="Kembali ke atas"><ArrowUp size={15} /> Ke Atas</button>
+              <button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!data.rows.length}><Plus size={16} /> Formula</button>
               <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><Settings2 size={16} /> Pivot Data</button>
-              <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button></div></div>
+              <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button>
+            </div></div>
             {formulaOpen && <div className="pivot-panel"><div className="pivot-title"><Plus size={16} /> Kolom formula</div>
               <input placeholder="Nama kolom, contoh: TOTAL" value={formulaName} onChange={e => setFormulaName(e.target.value)} />
               <input className="formula-input" placeholder="Contoh: [T1.NETWR] * 1.11" value={formulaExpression} onChange={e => setFormulaExpression(e.target.value)} />
@@ -1337,7 +1370,19 @@ function App() {
                   <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
                   <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}
                 {!compareFilters.length && <span className="metadata-status">Pilih kolom di atas untuk mengisi parameter.</span>}</div></div></div>
-          <div className="card changes-card" ref={compareResultRef}><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} record</span></div></div>
+          <div className="card changes-card" ref={compareResultRef}>
+            <div className="section-head">
+              <div>
+                <span className="icon-tile purple"><GitCompareArrows size={18} /></span>
+                <strong>Hasil Perbandingan</strong>
+                <span className="count-pill">{compareRows.length} record</span>
+              </div>
+              <div className="results-actions">
+                <button className="button subtle" onClick={scrollToTop} title="Kembali ke atas">
+                  <ArrowUp size={15} /> Ke Atas
+                </button>
+              </div>
+            </div>
             {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
               <div className="compare-tabs">{([['all', 'Semua Record', compareRows.length], ['same', 'Record Identik', compareRows.filter(row => row.status === 'same').length], ['different', 'Record Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
             {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="compare-record-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) =>
@@ -1482,7 +1527,18 @@ function App() {
                 <button className="button subtle" onClick={() => toggleSchedule(s)}>{s.enabled ? 'Jeda' : 'Aktifkan'}</button>
                 <button className="icon-button" title="Hapus" onClick={() => removeSchedule(s.id)}><Trash2 size={15} /></button></div></div>)
               : <div className="empty-small">Belum ada jadwal.</div>}</section>
-          <section className="card schedule-card"><div className="section-head"><div><span className="icon-tile green"><Table2 size={18} /></span><strong>Riwayat Eksekusi</strong></div></div>
+          <section className="card schedule-card">
+            <div className="section-head">
+              <div>
+                <span className="icon-tile green"><Table2 size={18} /></span>
+                <strong>Riwayat Eksekusi</strong>
+              </div>
+              <div className="results-actions">
+                <button className="button subtle" onClick={scrollToTop} title="Kembali ke atas">
+                  <ArrowUp size={15} /> Ke Atas
+                </button>
+              </div>
+            </div>
             {runs.length ? runs.map(run => <div className="history-row" key={run.id}><span className={`status-tag ${run.status === 'success' ? 'only_right' : 'only_left'}`}>{run.status.toUpperCase()}</span>
               <strong>{run.report_id ? reports.find(r => r.id === run.report_id)?.name || 'Laporan terhapus' : 'Query ad hoc'}</strong>
               <span>{run.row_count} baris</span><small>{new Date(run.started_at).toLocaleString('id-ID')}</small>
@@ -1723,6 +1779,31 @@ function App() {
             </div>
           </form>
         </div>
+      </div>
+    )}
+    {toasts.length > 0 && (
+      <div className="toast-container">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast ${t.type}`} role="alert">
+            <div className="toast-icon-wrap">
+              {t.type === 'success' && <CheckCircle2 size={16} />}
+              {t.type === 'error' && <AlertTriangle size={16} />}
+              {t.type === 'info' && <ShieldCheck size={16} />}
+            </div>
+            <div className="toast-content">
+              {t.title && <div className="toast-title">{t.title}</div>}
+              <div className="toast-desc">{t.message}</div>
+            </div>
+            <button
+              type="button"
+              className="toast-close"
+              title="Tutup notifikasi"
+              onClick={() => removeToast(t.id)}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        ))}
       </div>
     )}
   </div>
