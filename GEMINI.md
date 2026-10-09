@@ -25,6 +25,17 @@
 - JANGAN melakukan auto commit atau push ke remote secara otomatis tanpa persetujuan eksplisit dari pengguna.
 
 ## 6. Batasan Deployment & Lingkungan Production
-- **DILARANG KERAS MELAKUKAN DEPLOYMENT KE PRODUCTION**:
-  - Jangan pernah menyentuh, menyalin, memodifikasi, merestart service, atau melakukan deploy ke direktori production (`/var/www/` atau subdirektorinya).
+- **DILARANG KERAS MELAKUKAN DEPLOYMENT KE PRODUCTION SECARA OTOMATIS**:
+  - Jangan pernah menyentuh, menyalin, memodifikasi, merestart service, atau melakukan deploy ke direktori production (`/var/www/` atau subdirektorinya) tanpa instruksi spesifik.
   - Seluruh aktivitas pengembangan, pengujian, build, dan eksekusi server hanya boleh dilakukan di dalam workspace lokal pengembangan (`/data/Projects/Dynamic-Report`).
+  - Jika pengguna meminta cara/script deploy ke production, selalu berikan script berikut:
+    ```bash
+    # 1. Sinkronisasi source code & hasil build frontend terbaru
+    rsync -av --delete /data/Projects/Dynamic-Report/frontend/dist/ /var/www/Dynamic-Report/frontend/dist/
+    rsync -av /data/Projects/Dynamic-Report/frontend/src/ /var/www/Dynamic-Report/frontend/src/
+    rsync -av --exclude '__pycache__' /data/Projects/Dynamic-Report/backend/ /var/www/Dynamic-Report/backend/
+
+    # 2. Rebuild container docker production agar memuat build terbaru
+    cd /var/www/Dynamic-Report && docker compose up -d --build
+    ```
+

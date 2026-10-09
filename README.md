@@ -35,3 +35,15 @@ Saat startup, backend membuat schema dari `DATABASE_SCHEMA` dan tabel `sessions`
 .venv/bin/python -m unittest discover -s backend/tests -v
 cd frontend && npm run build
 ```
+
+## Cara Deploy ke Production
+
+```bash
+# 1. Sinkronisasi source code & hasil build frontend terbaru
+rsync -av --delete /data/Projects/Dynamic-Report/frontend/dist/ /var/www/Dynamic-Report/frontend/dist/
+rsync -av /data/Projects/Dynamic-Report/frontend/src/ /var/www/Dynamic-Report/frontend/src/
+rsync -av --exclude '__pycache__' /data/Projects/Dynamic-Report/backend/ /var/www/Dynamic-Report/backend/
+
+# 2. Rebuild container docker production agar memuat build terbaru
+cd /var/www/Dynamic-Report && docker compose up -d --build
+```
