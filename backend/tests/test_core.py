@@ -13,6 +13,29 @@ from backend.app import main
 
 
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structure_uses_sap_ddic_position_instead_of_alphabetical_order(self):
+        structure = {"structuredContent": {"fields": [
+            {"name": "ZZ_FIELD", "is_key": False},
+            {"name": "AA_FIELD", "is_key": True},
+        ]}}
+        positions = [{"FIELDNAME": "ZZ_FIELD", "POSITION": "0002"},
+                     {"FIELDNAME": "AA_FIELD", "POSITION": "0001"}]
+        with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
+             patch.object(main, "read_rows", AsyncMock(return_value=positions)) as read:
+            fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
+        self.assertEqual([field["name"] for field in fields], ["AA_FIELD", "ZZ_FIELD"])
+        self.assertEqual(read.call_args.args[0].table_name, "DD03L")
+
+    async def test_structure_uses_positions_already_supplied_by_gateway(self):
+        structure = {"structuredContent": {"fields": [
+            {"name": "Z_FIELD", "position": 2}, {"name": "A_FIELD", "position": 1},
+        ]}}
+        with patch.object(main, "rpc_call", AsyncMock(return_value=structure)), \
+             patch.object(main, "read_rows", AsyncMock()) as read:
+            fields, _ = await main.get_structure("token", {"id": "dev", "resource_key": "sap:dev"}, "MARA")
+        self.assertEqual([field["name"] for field in fields], ["A_FIELD", "Z_FIELD"])
+        read.assert_not_awaited()
+
     async def test_user_catalog_only_returns_user_connections(self):
         resources = [
             {"serverId": "gateway", "kind": "sap", "resource_key": "sap:dev", "label": "DEV"},

@@ -466,11 +466,14 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
             name = next((str(field.get(k)) for k in ("name", "field", "fieldname", "FIELDNAME")
                          if field.get(k)), "")
             if IDENT.fullmatch(name):
+                position_value = next((field.get(k) for k in ("position", "POSITION", "field_position", "fieldPosition")
+                                       if field.get(k) is not None), None)
                 fields.append({
                     "name": name.upper(),
                     "is_key": bool(field.get("is_key") or field.get("key") or field.get("KEYFLAG") == "X"),
                     "data_type": str(field.get("data_type") or field.get("datatype") or field.get("DATATYPE") or ""),
                     "check_table": str(field.get("check_table") or field.get("CHECKTABLE") or ""),
+                    "position": int(position_value) if str(position_value).strip().isdigit() else None,
                 })
         if fields:
             return fields, text_body
@@ -481,6 +484,7 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
         name_index = next((i for i, h in enumerate(headers) if h in ("field", "fieldname", "field name", "name")), -1)
         if name_index >= 0:
             fields = []
+            position_index = next((i for i, h in enumerate(headers) if h in ("position", "pos")), -1)
             for line in lines[2:]:
                 cells = [cell.strip() for cell in line.strip("|").split("|")]
                 if len(cells) <= name_index:
@@ -494,6 +498,7 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
                         "is_key": key_index >= 0 and key_index < len(cells) and cells[key_index].lower() in ("x", "yes", "true", "key"),
                         "data_type": cells[type_index] if type_index >= 0 and type_index < len(cells) else "",
                         "check_table": "",
+                        "position": int(cells[position_index]) if position_index >= 0 and position_index < len(cells) and cells[position_index].isdigit() else None,
                     })
             if fields:
                 return fields, text_body
@@ -508,7 +513,24 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
         "object_type": "TABLE",
         "resource_key": target["resource_key"],
     })
-    return parse_structure(result)
+    fields, raw = parse_structure(result)
+    if not fields:
+        return fields, raw
+    if not all(isinstance(field.get("position"), int) and field["position"] > 0 for field in fields):
+        try:
+            positions = await read_rows(ReadIn(
+                target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION"],
+                filters=[FilterIn(field="TABNAME", value=table_name.upper()),
+                         FilterIn(field="AS4LOCAL", value="A")], rowcount=1000,
+            ), token)
+            by_name = {str(row.get("FIELDNAME", "")).upper(): int(str(row["POSITION"]).strip())
+                       for row in positions if str(row.get("POSITION", "")).strip().isdigit()}
+            for field in fields:
+                field["position"] = field.get("position") or by_name.get(field["name"])
+        except (HTTPException, ValueError, KeyError):
+            pass
+    fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))
+    return fields, raw
 
 
 async def read_rows(dto: ReadIn, token: str) -> list[dict[str, Any]]:

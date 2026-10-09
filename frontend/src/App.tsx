@@ -51,16 +51,13 @@ function ComparisonMatrix({ row, fields, leftLabel, rightLabel, defaultOpen }: {
   const different = isMissing ? fields.length : row.changed_fields.length
   const status = row.status === 'same' ? 'Sama' : row.status === 'changed' ? 'Berubah'
     : row.status === 'only_left' ? 'Hanya sumber' : 'Hanya pembanding'
-  const orderedFields = [...fields].sort((a, b) =>
-    Number(row.changed_fields.includes(b)) - Number(row.changed_fields.includes(a)))
-
   return <details className={`compare-record ${row.status}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="compare-record-head"><div className="compare-record-title"><span className={`status-tag ${row.status}`}>{status.toUpperCase()}</span>
       <strong>{Object.entries(row.key).map(([field, value]) => `${field}: ${value}`).join(' · ')}</strong></div>
       <div className="compare-record-counts"><span className="same-count"><CheckCircle2 size={14} /> {isMissing ? 0 : fields.length - different} sama</span>
         <span className="different-count"><AlertTriangle size={14} /> {different} {isMissing ? 'tanpa pasangan' : 'berbeda'}</span><ChevronDown size={16} /></div></summary>
     <div className="compare-matrix-wrap"><table className="compare-matrix"><thead><tr><th>Kolom tabel</th><th>{leftLabel}</th><th>{rightLabel}</th><th>Status</th></tr></thead>
-      <tbody>{orderedFields.map(field => {
+      <tbody>{fields.map(field => {
         const fieldDiffers = isMissing || row.changed_fields.includes(field)
         return <tr className={fieldDiffers ? 'different' : 'same'} key={field}><th scope="row">{field}</th>
           <td className={!row.left ? 'missing' : ''}>{row.left ? compareValue(row.left[field]) : 'Tidak ada baris'}</td>
@@ -83,20 +80,10 @@ function TableNode({ id, data }: NodeProps<TableFlowNode>) {
 
   const joinedSet = useMemo(() => new Set(data.joinedFields || []), [data.joinedFields])
 
-  const { pinnedFields, otherFields } = useMemo(() => {
-    const pinned: StructureField[] = []
-    const others: StructureField[] = []
+  const visibleFields = useMemo(() => {
     const term = search.trim().toUpperCase()
-
-    for (const f of data.fields) {
-      if (joinedSet.has(f.name)) {
-        pinned.push(f)
-      } else if (!term || f.name.toUpperCase().includes(term) || f.data_type.toUpperCase().includes(term)) {
-        others.push(f)
-      }
-    }
-    return { pinnedFields: pinned, otherFields: others }
-  }, [data.fields, joinedSet, search])
+    return data.fields.filter(field => !term || field.name.toUpperCase().includes(term) || field.data_type.toUpperCase().includes(term))
+  }, [data.fields, search])
 
   useEffect(() => {
     updateNodeInternals(id)
@@ -106,20 +93,12 @@ function TableNode({ id, data }: NodeProps<TableFlowNode>) {
     <div className="table-node-header"><Table2 size={16} /><div><strong>{data.tableName || 'Pilih tabel'}</strong><small>{data.alias} · {data.fields.length} kolom</small></div></div>
     {data.fields.length > 6 && <div className="table-node-search-wrap nodrag"><Search size={12} />
       <input className="table-node-search" placeholder="Cari field…" value={search} onChange={e => setSearch(e.target.value)} /></div>}
-    {pinnedFields.length > 0 && <div className="table-node-pinned">
-      <div className="table-node-section-label">Field Terhubung</div>
-      {pinnedFields.map(field => <div className="table-node-field is-joined" key={field.name}>
-        <Handle type="target" position={Position.Left} id={field.name} />
-        <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
-        <Handle type="source" position={Position.Right} id={field.name} />
-      </div>)}
-    </div>}
     <div className="table-node-fields nowheel nodrag" onScroll={() => updateNodeInternals(id)}>
-      {otherFields.length ? otherFields.map(field => <div className="table-node-field" key={field.name}>
+      {visibleFields.length ? visibleFields.map(field => <div className={`table-node-field ${joinedSet.has(field.name) ? 'is-joined' : ''}`} key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
         <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
         <Handle type="source" position={Position.Right} id={field.name} />
-      </div>) : pinnedFields.length > 0 && !search ? null : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
+      </div>) : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
     </div>
   </div>
 }
