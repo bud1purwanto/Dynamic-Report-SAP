@@ -79,26 +79,33 @@ function TableNode({ id, data }: NodeProps<TableFlowNode>) {
   const [search, setSearch] = useState('')
 
   const joinedSet = useMemo(() => new Set(data.joinedFields || []), [data.joinedFields])
+  const linkedFields = useMemo(() => data.fields.filter(field => joinedSet.has(field.name)), [data.fields, joinedSet])
 
   const visibleFields = useMemo(() => {
     const term = search.trim().toUpperCase()
-    return data.fields.filter(field => !term || field.name.toUpperCase().includes(term) || field.data_type.toUpperCase().includes(term))
-  }, [data.fields, search])
+    return data.fields.filter(field => !joinedSet.has(field.name) && (!term || field.name.toUpperCase().includes(term) || field.data_type.toUpperCase().includes(term)))
+  }, [data.fields, joinedSet, search])
 
   useEffect(() => {
     updateNodeInternals(id)
-  }, [id, data.joinedFields, data.fields, updateNodeInternals])
+  }, [id, data.joinedFields, data.fields, search, updateNodeInternals])
 
   return <div className="table-node">
     <div className="table-node-header"><Table2 size={16} /><div><strong>{data.tableName || 'Pilih tabel'}</strong><small>{data.alias} · {data.fields.length} kolom</small></div></div>
     {data.fields.length > 6 && <div className="table-node-search-wrap nodrag"><Search size={12} />
       <input className="table-node-search" placeholder="Cari field…" value={search} onChange={e => setSearch(e.target.value)} /></div>}
+    {linkedFields.length > 0 && <div className="table-node-relations nodrag"><div className="table-node-relations-label">RELASI AKTIF <span>{linkedFields.length}</span></div>
+      {linkedFields.map(field => <div className="table-node-relation" key={field.name}>
+        <Handle type="target" position={Position.Left} id={field.name} />
+        <GitCompareArrows size={12} /><span>{field.name}</span><small>{field.data_type}</small>
+        <Handle type="source" position={Position.Right} id={field.name} />
+      </div>)}</div>}
     <div className="table-node-fields nowheel nodrag" onScroll={() => updateNodeInternals(id)}>
-      {visibleFields.length ? visibleFields.map(field => <div className={`table-node-field ${joinedSet.has(field.name) ? 'is-joined' : ''}`} key={field.name}>
+      {visibleFields.length ? visibleFields.map(field => <div className="table-node-field" key={field.name}>
         <Handle type="target" position={Position.Left} id={field.name} />
         <span title={field.is_key ? `Key Field: ${field.name}` : field.name}>{field.is_key && <KeyRound size={11} className="key-icon" />}{field.name}</span><small>{field.data_type}</small>
         <Handle type="source" position={Position.Right} id={field.name} />
-      </div>) : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
+      </div>) : <div className="table-node-empty">{data.loading ? 'Memuat kolom…' : data.tableName ? (search ? 'Tidak ada field cocok' : linkedFields.length ? 'Semua kolom sudah menjadi relasi aktif' : 'Struktur belum tersedia') : 'Isi nama tabel'}</div>}
     </div>
   </div>
 }
@@ -202,6 +209,7 @@ function App() {
     confirmTone?: 'danger' | 'primary'
     onConfirm: () => void
   }>({ open: false, title: '', message: '', onConfirm: () => {} })
+  const [relationModal, setRelationModal] = useState<{ joinIndex: number; conditionIndex: number } | null>(null)
   const [catalogModal, setCatalogModal] = useState<{ open: boolean; targetIndex?: number; mode?: 'builder' | 'compare' }>({ open: false })
   const [catalogSearch, setCatalogSearch] = useState('')
   const [catalogLoading, setCatalogLoading] = useState(false)
@@ -218,6 +226,7 @@ function App() {
 
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
+  const compareResultRef = useRef<HTMLDivElement>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
 
   async function openTableCatalog(targetIndex?: number, mode: 'builder' | 'compare' = 'builder') {
@@ -397,6 +406,7 @@ function App() {
   }, [structureSignature, structureKeys])
 
   function resetWorkspace() {
+    setRelationModal(null)
     setActiveReport('')
     setReportName('')
     setQuery({
@@ -524,6 +534,29 @@ function App() {
     } : join) }))
   }
 
+  function relationConditions(join: Join): JoinCondition[] {
+    return join.conditions?.length ? join.conditions : join.left_field && join.right_field
+      ? [{ left_field: join.left_field, right_field: join.right_field }] : []
+  }
+
+  function changeRelationField(patch: Partial<JoinCondition>) {
+    if (!relationModal) return
+    const join = query.joins[relationModal.joinIndex]
+    if (!join) return
+    setJoinConditions(relationModal.joinIndex, relationConditions(join).map((condition, index) =>
+      index === relationModal.conditionIndex ? { ...condition, ...patch } : condition))
+  }
+
+  function deleteRelationField() {
+    if (!relationModal) return
+    const join = query.joins[relationModal.joinIndex]
+    if (!join) return
+    const remaining = relationConditions(join).filter((_, index) => index !== relationModal.conditionIndex)
+    setJoinConditions(relationModal.joinIndex, remaining)
+    setRelationModal(null)
+    setNotice(remaining.length ? 'Kondisi relasi dihapus.' : 'Relasi dihapus. Hubungkan field kembali sebelum menjalankan query.')
+  }
+
   function connectFields(connection: Connection) {
     const sourceIndex = query.sources.findIndex(source => source.alias === connection.source)
     const targetIndex = query.sources.findIndex(source => source.alias === connection.target)
@@ -618,7 +651,13 @@ function App() {
       )
       setCompareRows(result.rows)
       setCompareResult(result)
-      setNotice(`${result.rows.filter(row => row.status === 'same').length} sama, ${result.rows.filter(row => row.status !== 'same').length} berbeda${result.complete ? '.' : ' (hasil mungkin parsial).'}`)
+      const sameCount = result.rows.filter(row => row.status === 'same').length
+      const diffCount = result.rows.filter(row => row.status !== 'same').length
+      setNotice(`Perbandingan selesai: ${result.rows.length} record (${sameCount} identik, ${diffCount} record berbeda).` +
+        (result.complete ? '' : ' Hasil mungkin parsial (mencapai batas baris).'))
+      window.setTimeout(() => {
+        compareResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 100)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
@@ -679,6 +718,7 @@ function App() {
   }
 
   async function selectReport(report: Report) {
+    setRelationModal(null)
     const targetAllowed = servers.some(server => server.id === report.definition.target)
     setQuery({ ...report.definition, target: targetAllowed ? report.definition.target : '' })
     if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
@@ -938,14 +978,23 @@ function App() {
   [data.columns, visibleColumns])
 
   const flowEdges = useMemo(() => query.joins.flatMap((join, index) => {
-    const conditions = join.conditions?.length ? join.conditions : join.left_field && join.right_field
-      ? [{ left_field: join.left_field, right_field: join.right_field }] : []
+    const conditions = relationConditions(join)
     return conditions.map((condition, conditionIndex) => ({
       id: `join-${index}-${conditionIndex}`, source: join.left_alias, target: join.right_alias,
       sourceHandle: condition.left_field, targetHandle: condition.right_field,
-      markerEnd: { type: MarkerType.ArrowClosed }, style: { stroke: '#3d74c8', strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed }, interactionWidth: 22,
+      label: join.how === 'inner' ? 'INNER' : 'LEFT',
+      labelStyle: { fill: '#315f9c', fontSize: 8, fontWeight: 700 },
+      labelBgStyle: { fill: '#fff', stroke: '#cfdef2' }, labelBgBorderRadius: 4, labelBgPadding: [3, 2] as [number, number],
+      style: { stroke: relationModal?.joinIndex === index && relationModal.conditionIndex === conditionIndex ? '#e2982f' : '#3d74c8', strokeWidth: 2.5 },
     }))
-  }), [query.joins])
+  }), [query.joins, relationModal])
+  const editingJoin = relationModal ? query.joins[relationModal.joinIndex] : null
+  const editingCondition = editingJoin && relationModal ? relationConditions(editingJoin)[relationModal.conditionIndex] : null
+  const editingLeftSource = editingJoin ? query.sources.find(source => source.alias === editingJoin.left_alias) : null
+  const editingRightSource = editingJoin ? query.sources.find(source => source.alias === editingJoin.right_alias) : null
+  const editingLeftFields = editingLeftSource ? metadataFor(editingLeftSource) : []
+  const editingRightFields = editingRightSource ? metadataFor(editingRightSource) : []
 
   if (loading) return <div className="loading-screen"><div className="spinner" />Memuat Lumina…</div>
   if (!user) return <div className="login-shell">
@@ -1141,7 +1190,10 @@ function App() {
             <section className="card canvas-card"><div className="section-head"><div><span className="icon-tile purple"><Settings2 size={18} /></span><strong>Visual Canvas</strong></div>
               <span className="tiny-pill">Geser latar · Tarik header tabel · Hubungkan field</span></div>
               <div className="flow-wrap"><ReactFlow<TableFlowNode> nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange} onConnect={connectFields} onInit={instance => { flowRef.current = instance }}
+                onNodesChange={onNodesChange} onConnect={connectFields} onEdgeClick={(_, edge) => {
+                  const match = /^join-(\d+)-(\d+)$/.exec(edge.id)
+                  if (match) setRelationModal({ joinIndex: Number(match[1]), conditionIndex: Number(match[2]) })
+                }} onInit={instance => { flowRef.current = instance }}
                 fitView panOnDrag nodesDraggable nodesConnectable elementsSelectable deleteKeyCode={null}
                 minZoom={0.2} maxZoom={1.8}>
                   <Background color="#dae3ef" gap={20} /><Controls showInteractive={false} /></ReactFlow></div>
@@ -1285,9 +1337,9 @@ function App() {
                   <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
                   <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}
                 {!compareFilters.length && <span className="metadata-status">Pilih kolom di atas untuk mengisi parameter.</span>}</div></div></div>
-          <div className="card changes-card"><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} key</span></div></div>
+          <div className="card changes-card" ref={compareResultRef}><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} record</span></div></div>
             {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
-              <div className="compare-tabs">{([['all', 'Semua', compareRows.length], ['same', 'Sama', compareRows.filter(row => row.status === 'same').length], ['different', 'Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
+              <div className="compare-tabs">{([['all', 'Semua Record', compareRows.length], ['same', 'Record Identik', compareRows.filter(row => row.status === 'same').length], ['different', 'Record Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
             {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="compare-record-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) =>
               <ComparisonMatrix key={Object.values(row.key).join('|')} row={row} fields={compareResult.fields}
                 leftLabel={servers.find(server => server.id === compareTarget)?.label || 'Server sumber'}
@@ -1496,6 +1548,26 @@ function App() {
               Tutup
             </button>
           </div>
+        </div>
+      </div>
+    )}
+    {editingJoin && editingCondition && relationModal && (
+      <div className="modal-backdrop" onClick={() => setRelationModal(null)}>
+        <div className="modal-card relation-modal" onClick={event => event.stopPropagation()}>
+          <div className="modal-head"><div className="modal-title"><span className="modal-title-icon blue"><GitCompareArrows size={18} /></span><span>Atur Relasi</span></div>
+            <button className="icon-button" title="Tutup" onClick={() => setRelationModal(null)}><X size={16} /></button></div>
+          <div className="relation-modal-body"><p>{editingLeftSource?.table_name || editingJoin.left_alias} → {editingRightSource?.table_name || editingJoin.right_alias}</p>
+            <label>Jenis join<select value={editingJoin.how || 'left'} onChange={event => updateJoin(relationModal.joinIndex, { how: event.target.value })}>
+              <option value="left">LEFT JOIN</option><option value="inner">INNER JOIN</option></select></label>
+            <div className="relation-modal-fields"><label>Field sumber<select value={editingCondition.left_field} onChange={event => changeRelationField({ left_field: event.target.value })}>
+              {!editingLeftFields.some(field => field.name === editingCondition.left_field) && <option value={editingCondition.left_field}>{editingCondition.left_field}</option>}
+              {editingLeftFields.map(field => <option key={field.name} value={field.name}>{field.name}</option>)}</select></label>
+              <span>=</span><label>Field tujuan<select value={editingCondition.right_field} onChange={event => changeRelationField({ right_field: event.target.value })}>
+                {!editingRightFields.some(field => field.name === editingCondition.right_field) && <option value={editingCondition.right_field}>{editingCondition.right_field}</option>}
+                {editingRightFields.map(field => <option key={field.name} value={field.name}>{field.name}</option>)}</select></label></div>
+            <small>Perubahan langsung diterapkan pada canvas dan query.</small></div>
+          <div className="modal-actions relation-modal-actions"><button className="button danger" onClick={deleteRelationField}><Trash2 size={14} /> {relationConditions(editingJoin).length === 1 ? 'Hapus relasi' : 'Hapus kondisi'}</button>
+            <button className="button primary" onClick={() => setRelationModal(null)}>Selesai</button></div>
         </div>
       </div>
     )}
