@@ -13,6 +13,31 @@ from backend.app import main
 
 
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compare_uses_all_metadata_fields_and_reports_same_and_different_rows(self):
+        metadata = [
+            {"name": "MANDT", "is_key": True},
+            {"name": "MATNR", "is_key": True},
+            {"name": "MTART", "is_key": False},
+        ]
+        async def read_rows(dto, _token):
+            self.assertEqual(dto.fields, ["MANDT", "MATNR", "MTART"])
+            if dto.target == "dev":
+                return [{"MANDT": "100", "MATNR": "A", "MTART": "FERT"},
+                        {"MANDT": "100", "MATNR": "B", "MTART": "FERT"}]
+            return [{"MANDT": "100", "MATNR": "A", "MTART": "FERT"},
+                    {"MANDT": "100", "MATNR": "B", "MTART": "HALB"}]
+
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "dev", "resource_key": "sap:dev"},
+            {"id": "qa", "resource_key": "sap:qa"}])), \
+             patch.object(main, "get_structure", AsyncMock(return_value=(metadata, ""))), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.compare(main.CompareIn(target="dev", other_target="qa",
+                                                       table_name="MARA"), (None, "token"))
+        self.assertEqual(result["key_fields"], ["MATNR"])
+        self.assertEqual([row["status"] for row in result["rows"]], ["same", "changed"])
+        self.assertEqual(result["rows"][1]["changed_fields"], ["MTART"])
+
     async def test_query_joins_two_tables_and_checks_metadata(self):
         async def read_rows(dto, _token):
             if dto.table_name == "MARA":

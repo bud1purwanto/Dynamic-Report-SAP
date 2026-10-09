@@ -57,6 +57,11 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1)
 
 
+class ChangePasswordIn(BaseModel):
+    old_password: str | None = None
+    new_password: str = Field(min_length=6)
+
+
 class CredentialIn(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
@@ -101,9 +106,12 @@ class FormulaIn(BaseModel):
     expression: str = Field(min_length=1, max_length=500)
 
 
-class CompareIn(ReadIn):
-    other_target: str
-    key_fields: list[str] = Field(min_length=1, max_length=10)
+class CompareIn(BaseModel):
+    target: str = Field(min_length=1)
+    other_target: str = Field(min_length=1)
+    table_name: str
+    filters: list[FilterIn] = Field(default_factory=list, max_length=10)
+    rowcount: int = Field(default=100, ge=1, le=1000)
 
 
 class SourceIn(BaseModel):
@@ -534,6 +542,65 @@ async def login(dto: LoginIn, request: Request, response: Response, db: Session 
 @app.get("/api/auth/me")
 async def me(auth: tuple[AppSession, str] = Depends(get_token)):
     return {"user": auth[0].user_profile}
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    dto: ChangePasswordIn,
+    request: Request,
+    response: Response,
+    auth: tuple[AppSession, str] = Depends(get_token),
+    db: Session = Depends(get_db),
+):
+    session, token = auth
+    user_id = session.user_id
+    payload = {"newPassword": dto.new_password}
+    if dto.old_password:
+        payload["oldPassword"] = dto.old_password
+
+    try:
+        refresh = fernet.decrypt(session.refresh_token.encode()).decode()
+    except InvalidToken:
+        refresh = ""
+
+    cookies = {"refresh_token": refresh} if refresh else {}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.post(
+                f"{settings.oidc_issuer}/v1/auth/change-password",
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                cookies=cookies,
+            )
+        if res.status_code in (400, 401, 403):
+            detail = "Gagal mengubah password."
+            try:
+                err_data = res.json()
+                detail = err_data.get("message") or err_data.get("detail") or detail
+                if isinstance(detail, list):
+                    detail = ", ".join(detail)
+            except Exception:
+                pass
+            raise HTTPException(res.status_code, detail)
+        fail_upstream(res, "OIDC")
+        data = res.json()
+        new_token = data.get("accessToken") or token
+        new_refresh = res.cookies.get("refresh_token") or refresh
+        session.access_token = fernet.encrypt(new_token.encode()).decode()
+        if new_refresh:
+            session.refresh_token = fernet.encrypt(new_refresh.encode()).decode()
+        session.access_expires_at = utcnow() + timedelta(seconds=int(data.get("expiresIn", 900)))
+
+        # Update mustChangePassword flag in stored user_profile
+        if isinstance(session.user_profile, dict):
+            profile = dict(session.user_profile)
+            profile["mustChangePassword"] = False
+            session.user_profile = profile
+        db.commit()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(502, "Layanan OIDC tidak merespons perubahan password.") from None
+
+    return {"success": True, "user": session.user_profile}
 
 
 @app.post("/api/auth/logout")
@@ -983,13 +1050,33 @@ async def formula(dto: FormulaIn, auth: tuple[AppSession, str] = Depends(get_tok
 
 @app.post("/api/sap/compare")
 async def compare(dto: CompareIn, auth: tuple[AppSession, str] = Depends(get_token)):
-    if any(k.upper() not in [f.upper() for f in dto.fields] for k in dto.key_fields):
-        raise HTTPException(422, "Key perbandingan harus ada dalam fields.")
-    left = await read_rows(ReadIn(**dto.model_dump(exclude={"other_target", "key_fields"})), auth[1])
-    right_data = dto.model_dump(exclude={"other_target", "key_fields"})
-    right_data["target"] = dto.other_target
-    right = await read_rows(ReadIn(**right_data), auth[1])
-    keys = [k.upper() for k in dto.key_fields]
+    if dto.target == dto.other_target:
+        raise HTTPException(422, "Pilih dua server SAP yang berbeda.")
+    catalog = await user_catalog(auth[1])
+    source = match_target(catalog, dto.target)
+    comparison = match_target(catalog, dto.other_target)
+    source_fields, _ = await get_structure(auth[1], source, dto.table_name)
+    comparison_fields, _ = await get_structure(auth[1], comparison, dto.table_name)
+    fields = [field["name"] for field in source_fields]
+    if not fields or set(fields) != {field["name"] for field in comparison_fields}:
+        raise HTTPException(422, "Struktur field tabel berbeda atau tidak tersedia pada kedua server.")
+    if len(fields) > 100:
+        raise HTTPException(422, "Tabel memiliki lebih dari 100 field; gateway belum mendukung pembacaan semua field sekaligus.")
+    source_keys = {field["name"] for field in source_fields if field["is_key"]}
+    comparison_keys = {field["name"] for field in comparison_fields if field["is_key"]}
+    if source_keys != comparison_keys or not source_keys:
+        raise HTTPException(422, "Key tabel tidak tersedia atau berbeda pada kedua server.")
+    # SAP client numbers may differ across DEV, QA, and PRD.
+    keys = [field for field in fields if field in source_keys and (field != "MANDT" or len(source_keys) == 1)]
+    if not keys:
+        raise HTTPException(422, "Tabel tidak memiliki key bisnis yang dapat digunakan.")
+    for item in dto.filters:
+        if item.field.upper() not in fields:
+            raise HTTPException(422, f"Field filter {item.field} tidak ada pada tabel.")
+    left = await read_rows(ReadIn(target=dto.target, table_name=dto.table_name, fields=fields,
+                                  filters=dto.filters, rowcount=dto.rowcount), auth[1])
+    right = await read_rows(ReadIn(target=dto.other_target, table_name=dto.table_name, fields=fields,
+                                   filters=dto.filters, rowcount=dto.rowcount), auth[1])
     def indexed(rows):
         out = {}
         for row in rows:
@@ -999,13 +1086,19 @@ async def compare(dto: CompareIn, auth: tuple[AppSession, str] = Depends(get_tok
             out[key] = row
         return out
     a, b = indexed(left), indexed(right)
-    changes = []
+    rows = []
     for key in sorted(a.keys() | b.keys()):
         old, new = a.get(key), b.get(key)
-        if old != new:
-            changes.append({"key": dict(zip(keys, key)), "status": "changed" if old and new else
-                            "only_left" if old else "only_right", "left": old, "right": new})
-    return {"left_count": len(left), "right_count": len(right), "changes": changes}
+        changed_fields = [field for field in fields if old and new and old.get(field) != new.get(field)]
+        rows.append({"key": dict(zip(keys, key)),
+                     "status": "only_left" if old is not None and new is None else
+                               "only_right" if old is None and new is not None else
+                               "changed" if changed_fields else "same",
+                     "changed_fields": changed_fields, "left": old, "right": new})
+    # A full page may have more rows behind it; the gateway read contract has no cursor.
+    complete = len(left) < dto.rowcount and len(right) < dto.rowcount
+    return {"left_count": len(left), "right_count": len(right), "rows": rows,
+            "fields": fields, "key_fields": keys, "complete": complete, "row_limit": dto.rowcount}
 
 
 @app.get("/api/reports")

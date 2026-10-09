@@ -4,14 +4,14 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  AlertTriangle, ArrowRight, BarChart3, BookOpen, ChevronDown, Columns3, CopyPlus, Database, Download,
-  GitCompareArrows, KeyRound, Layers3, LogOut, Play, Plus, Save, Search,
-  Settings2, ShieldCheck, Table2, Trash2, WandSparkles, X,
+  AlertTriangle, ArrowRight, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
+  Edit2, GitCompareArrows, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
+  Settings2, ShieldCheck, Table2, Trash2, X,
 } from 'lucide-react'
 import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
 
-type User = { id?: string; username?: string; email?: string; roles?: string[] }
+type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
 type Report = { id: string; name: string; definition: Query }
 type Credential = { connectionId: string; target?: string; hasCredential: boolean; username?: string }
 type Variant = { id: string; name: string; layout: {
@@ -19,7 +19,7 @@ type Variant = { id: string; name: string; layout: {
   columnState?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getColumnState']>
   filterModel?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getFilterModel']>
 } }
-type Tab = 'builder' | 'compare' | 'credentials' | 'ai' | 'schedules'
+type Tab = 'builder' | 'compare' | 'credentials' | 'schedules'
 type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
 type ReportRun = { id: string; report_id: string | null; status: string; row_count: number; has_artifact: boolean;
@@ -127,14 +127,17 @@ function App() {
   const [formulaName, setFormulaName] = useState('')
   const [formulaExpression, setFormulaExpression] = useState('')
   const [otherTarget, setOtherTarget] = useState('')
-  const [compareKeys, setCompareKeys] = useState('')
-  const [changes, setChanges] = useState<{ key: Row; status: string; left: Row | null; right: Row | null }[]>([])
+  const [compareTarget, setCompareTarget] = useState('')
+  const [compareTable, setCompareTable] = useState('')
+  const [compareFilters, setCompareFilters] = useState<Source['filters']>([])
+  const [compareRowcount, setCompareRowcount] = useState(100)
+  const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
+  const [compareRows, setCompareRows] = useState<{ key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }[]>([])
+  const [compareView, setCompareView] = useState<'all' | 'same' | 'different'>('all')
+  useEffect(() => { setCompareResult(null); setCompareRows([]) }, [compareTarget, otherTarget, compareTable, compareFilters, compareRowcount])
   const [credTarget, setCredTarget] = useState('')
   const [sapUsername, setSapUsername] = useState('')
   const [sapPassword, setSapPassword] = useState('')
-  const [aiPrompt, setAiPrompt] = useState('')
-  const [aiDraft, setAiDraft] = useState<{ query: Query; explanation: string } | null>(null)
-  const [aiModel, setAiModel] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [runs, setRuns] = useState<ReportRun[]>([])
   const [scheduleReport, setScheduleReport] = useState('')
@@ -157,6 +160,16 @@ function App() {
   const [catalogSearch, setCatalogSearch] = useState('')
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogTables, setCatalogTables] = useState<{ name: string; description: string }[]>([])
+
+  // Modal Ganti Password OIDC
+  const [changePasswordModal, setChangePasswordModal] = useState(false)
+  const [oldPassword, setOldPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [changePasswordLoading, setChangePasswordLoading] = useState(false)
+  const [changePasswordError, setChangePasswordError] = useState('')
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false)
+
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
@@ -233,6 +246,7 @@ function App() {
     if (catalog.status === 'fulfilled') {
       setServers(catalog.value.resources)
       setQuery(q => ({ ...q, target: q.target || catalog.value.resources[0]?.id || '' }))
+      setCompareTarget(t => t || catalog.value.resources[0]?.id || '')
       setCredTarget(t => t || catalog.value.resources[0]?.id || '')
       setOtherTarget(t => t || catalog.value.resources[1]?.id || '')
     }
@@ -348,9 +362,8 @@ function App() {
     setStructureLoading({})
     setFieldSearch({})
     setFieldText({})
-    setChanges([])
-    setAiDraft(null)
-    setAiPrompt('')
+    setCompareRows([])
+    setCompareResult(null)
     setSchedules([])
     setRuns([])
     setScheduleReport('')
@@ -370,10 +383,20 @@ function App() {
     finally { setBusy(false) }
   }
 
-  async function logout() {
+  async function doLogout() {
     await post('/auth/logout', {}).catch(() => {})
     setUser(null); setReports([])
     resetWorkspace()
+  }
+
+  function confirmLogout() {
+    showConfirm({
+      title: 'Konfirmasi Keluar',
+      message: 'Apakah Anda yakin ingin keluar dari sesi Lumina ini?',
+      confirmLabel: 'Ya, Keluar',
+      confirmTone: 'danger',
+      onConfirm: doLogout,
+    })
   }
 
   function metadataFor(source: Source): StructureField[] {
@@ -527,18 +550,20 @@ function App() {
   }
 
   async function runCompare() {
-    if (query.sources.length !== 1) { setError('Perbandingan memakai satu tabel. Hapus tabel join dahulu.'); return }
-    setBusy(true); setError('')
+    if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return }
+    if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return }
+    if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return }
+    if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return }
+    setBusy(true); setError(''); setCompareResult(null); setCompareRows([])
     try {
-      const source = query.sources[0]
-      const result = await post<{ left_count: number; right_count: number; changes: typeof changes }>(
+      const result = await post<NonNullable<typeof compareResult> & { rows: typeof compareRows }>(
         '/sap/compare',
-        { target: query.target, other_target: otherTarget, table_name: source.table_name,
-          fields: source.fields, filters: source.filters, rowcount: query.rowcount,
-          key_fields: compareKeys.split(',').map(x => x.trim()).filter(Boolean) },
+        { target: compareTarget, other_target: otherTarget, table_name: compareTable.trim(),
+          filters: compareFilters, rowcount: compareRowcount },
       )
-      setChanges(result.changes)
-      setNotice(`${result.changes.length} perubahan dari ${result.left_count} dan ${result.right_count} baris.`)
+      setCompareRows(result.rows)
+      setCompareResult(result)
+      setNotice(`${result.rows.filter(row => row.status === 'same').length} sama, ${result.rows.filter(row => row.status !== 'same').length} berbeda${result.complete ? '.' : ' (hasil mungkin parsial).'}`)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
@@ -662,23 +687,49 @@ function App() {
     finally { setBusy(false) }
   }
 
-  async function generateDraft() {
-    setBusy(true); setError(''); setAiDraft(null)
-    try {
-      const result = await post<{ query: Query; explanation: string; requires_review: boolean }>(
-        '/ai/draft-query', { prompt: aiPrompt, current_query: query },
-      )
-      setAiDraft({ query: result.query, explanation: result.explanation })
-    } catch (e) { setError(message(e)) }
-    finally { setBusy(false) }
+  function editCredentialForServer(server: Server) {
+    const cred = credentials.find(c => c.connectionId === server.id)
+    setCredTarget(server.id)
+    setSapUsername(cred?.username || '')
+    setSapPassword('')
+    setError('')
   }
 
-  async function openAi() {
-    setTab('ai')
+  async function submitChangePassword(event?: React.FormEvent) {
+    if (event) event.preventDefault()
+    setChangePasswordError('')
+    if (newPassword.length < 6) {
+      setChangePasswordError('Password baru minimal 6 karakter.')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setChangePasswordError('Konfirmasi password tidak cocok dengan password baru.')
+      return
+    }
+    const isForced = !!user?.mustChangePassword
+    if (!isForced && !oldPassword) {
+      setChangePasswordError('Password saat ini wajib diisi.')
+      return
+    }
+
+    setChangePasswordLoading(true)
     try {
-      const result = await api<{ available: boolean; model: string }>('/ai/status')
-      setAiModel(result.available ? result.model : 'Model lokal tidak tersedia')
-    } catch { setAiModel('Model lokal tidak tersedia') }
+      const payload: { new_password: string; old_password?: string } = { new_password: newPassword }
+      if (!isForced && oldPassword) {
+        payload.old_password = oldPassword
+      }
+      const res = await post<{ success: boolean; user: User }>('/auth/change-password', payload)
+      setUser(res.user)
+      setOldPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setChangePasswordModal(false)
+      setNotice('Password akun OIDC berhasil diperbarui.')
+    } catch (e) {
+      setChangePasswordError(message(e))
+    } finally {
+      setChangePasswordLoading(false)
+    }
   }
 
   async function openSchedules() {
@@ -807,7 +858,6 @@ function App() {
         <button className={tab === 'builder' ? 'active' : ''} onClick={() => setTab('builder')}><Columns3 size={18} /> Query Builder</button>
         <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}><GitCompareArrows size={18} /> Bandingkan Data</button>
         <button className={tab === 'credentials' ? 'active' : ''} onClick={() => setTab('credentials')}><KeyRound size={18} /> Kredensial SAP</button>
-        <button className={tab === 'ai' ? 'active' : ''} onClick={openAi}><WandSparkles size={18} /> Asisten AI</button>
         <button className={tab === 'schedules' ? 'active' : ''} onClick={openSchedules}><BarChart3 size={18} /> Jadwal & Riwayat</button>
       </nav>
       <div className="sidebar-label saved-label">LAPORAN TERSIMPAN <span>{reports.length}</span></div>
@@ -828,12 +878,59 @@ function App() {
       {!reports.length && <p>Belum ada laporan.</p>}</div>
       <div className="sidebar-bottom"><div className="user-avatar">{(user.username || user.email || 'U')[0].toUpperCase()}</div>
         <div className="user-info"><strong>{user.username || user.email}</strong><small>{user.roles?.[0] || 'User'}</small></div>
-        <button className="icon-button" title="Keluar" onClick={logout}><LogOut size={17} /></button></div>
+        <button className="icon-button" title="Keluar" onClick={confirmLogout}><LogOut size={17} /></button></div>
     </aside>
 
     <main className="main">
-      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> {tab === 'builder' ? 'Query Builder' : tab === 'compare' ? 'Bandingkan Data' : tab === 'credentials' ? 'Kredensial SAP' : tab === 'ai' ? 'Asisten AI' : 'Jadwal & Riwayat'}</div>
-        <div className="top-right"><span className="connection-dot" /> OIDC connected <div className="avatar-mini">{(user.username || 'U')[0].toUpperCase()}</div></div></header>
+      <header className="topbar">
+        <div className="breadcrumb">Workspace <span>/</span> {tab === 'builder' ? 'Query Builder' : tab === 'compare' ? 'Bandingkan Data' : tab === 'credentials' ? 'Kredensial SAP' : 'Jadwal & Riwayat'}</div>
+        <div className="top-right" style={{ position: 'relative' }}>
+          <span className="connection-dot" />
+          <span style={{ fontSize: '11px', color: '#4d627d' }}>OIDC connected</span>
+          <button
+            type="button"
+            className="user-top-btn"
+            onClick={() => setUserDropdownOpen(!userDropdownOpen)}
+            title="Menu Akun OIDC"
+          >
+            <div className="avatar-mini">{(user.username || 'U')[0].toUpperCase()}</div>
+            <span style={{ fontSize: '11px', fontWeight: 600, color: '#273c57' }}>{user.username || user.email}</span>
+            <ChevronDown size={14} style={{ color: '#8898aa', transform: userDropdownOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
+          </button>
+          {userDropdownOpen && (
+            <div className="user-dropdown-menu" onClick={e => e.stopPropagation()}>
+              <div className="user-dropdown-header">
+                <strong>{user.username || user.email}</strong>
+                <small>{user.roles?.[0] || 'User'} · OIDC Account</small>
+              </div>
+              <button
+                type="button"
+                className="user-dropdown-item"
+                onClick={() => {
+                  setUserDropdownOpen(false)
+                  setChangePasswordError('')
+                  setOldPassword('')
+                  setNewPassword('')
+                  setConfirmPassword('')
+                  setChangePasswordModal(true)
+                }}
+              >
+                <Lock size={14} /> Ganti Password OIDC
+              </button>
+              <button
+                type="button"
+                className="user-dropdown-item text-danger"
+                onClick={() => {
+                  setUserDropdownOpen(false)
+                  confirmLogout()
+                }}
+              >
+                <LogOut size={14} /> Keluar
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
       <div className="content">
         {error && <div className="alert error dismiss" onClick={() => setError('')}>{error}<span>×</span></div>}
         {notice && <div className="alert success dismiss" onClick={() => setNotice('')}>{notice}<span>×</span></div>}
@@ -974,13 +1071,13 @@ function App() {
           </section>
           <section className="card results-card"><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
             <div className="results-actions"><button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!data.rows.length}><Plus size={16} /> Formula</button>
-              <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><WandSparkles size={16} /> Pivot Data</button>
+              <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><Settings2 size={16} /> Pivot Data</button>
               <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button></div></div>
             {formulaOpen && <div className="pivot-panel"><div className="pivot-title"><Plus size={16} /> Kolom formula</div>
               <input placeholder="Nama kolom, contoh: TOTAL" value={formulaName} onChange={e => setFormulaName(e.target.value)} />
               <input className="formula-input" placeholder="Contoh: [T1.NETWR] * 1.11" value={formulaExpression} onChange={e => setFormulaExpression(e.target.value)} />
               <button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaExpression}>Terapkan</button></div>}
-            {pivotOpen && <div className="pivot-panel"><div className="pivot-title"><WandSparkles size={16} /> Pivot data</div>
+            {pivotOpen && <div className="pivot-panel"><div className="pivot-title"><Settings2 size={16} /> Pivot data</div>
               <select value={pivotIndex} onChange={e => setPivotIndex(e.target.value)}><option value="">Key / index</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
               <select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Nama kolom baru</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
               <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Nilai</option>{data.columns.map(c => <option key={c}>{c}</option>)}</select>
@@ -1000,54 +1097,144 @@ function App() {
         </>}
         {tab === 'compare' && <><div className="page-heading"><div><span className="eyebrow">DATA QUALITY</span><h1>Bandingkan Data</h1>
           <p>Temukan perbedaan data tabel yang sama di dua server SAP.</p></div><button className="button primary" onClick={runCompare} disabled={busy}><GitCompareArrows size={16} /> Bandingkan</button></div>
-          <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
+          <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={compareTarget} onChange={e => setCompareTarget(e.target.value)}>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
             <GitCompareArrows size={22} /><label>SERVER PEMBANDING<select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label></div>
-            <div className="compare-options"><label>Tabel<input placeholder="MARA" value={query.sources[0].table_name} onChange={e => updateSource(0, { table_name: e.target.value.toUpperCase() })} /></label>
-              <label>Fields<input placeholder="MATNR, MTART" value={fieldText[query.sources[0].alias] ?? query.sources[0].fields.join(', ')}
-                onChange={e => {
-                  setFieldText(current => ({ ...current, [query.sources[0].alias]: e.target.value.toUpperCase() }))
-                  updateSource(0, { fields: e.target.value.toUpperCase().split(',').map(x => x.trim()).filter(Boolean) })
-                }} /></label>
-              <label>Key unik<input placeholder="MATNR" value={compareKeys} onChange={e => setCompareKeys(e.target.value.toUpperCase())} /></label></div></div>
-          <div className="card changes-card"><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Perubahan</strong><span className="count-pill">{changes.length}</span></div></div>
-            {changes.length ? <div className="change-list">{changes.map((change, i) => <div className="change-item" key={i}>
-              <span className={`status-tag ${change.status}`}>{change.status === 'changed' ? 'BERUBAH' : change.status === 'only_left' ? 'HANYA SUMBER' : 'HANYA PEMBANDING'}</span>
-              <strong>{Object.values(change.key).join(' · ')}</strong><div className="change-values"><pre>{JSON.stringify(change.left, null, 2)}</pre><ArrowRight size={16} /><pre>{JSON.stringify(change.right, null, 2)}</pre></div></div>)}</div>
-              : <div className="empty-state"><div className="empty-illustration"><GitCompareArrows size={27} /></div><strong>Belum ada perbandingan</strong><p>Pilih dua server, tabel, fields, dan key unik.</p></div>}</div></>}
+            <div className="compare-options"><label>Tabel<input placeholder="MARA" value={compareTable} onChange={e => setCompareTable(e.target.value.toUpperCase())} /></label>
+              <p>Semua field tabel dibandingkan. Key baris diambil otomatis dari struktur SAP pada kedua server.</p></div>
+            <div className="compare-settings"><label>Batas baris per server<input type="number" min={1} max={1000} value={compareRowcount} onChange={e => setCompareRowcount(Number(e.target.value))} /></label>
+              <div className="compare-filter-panel"><div className="filter-heading"><span>FILTER (BERLAKU UNTUK KEDUA SERVER)</span><button className="text-button" disabled={compareFilters.length >= 10} onClick={() => setCompareFilters(current => [...current, { field: '', operator: 'EQ', value: '' }])}><Plus size={13} /> Tambah filter</button></div>
+                {compareFilters.map((filter, index) => <div className="filter-row" key={index}><input placeholder="Field" value={filter.field} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, field: e.target.value.toUpperCase() } : item))} />
+                  <select value={filter.operator} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, operator: e.target.value } : item))}>{['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
+                  <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
+                  <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}</div></div></div>
+          <div className="card changes-card"><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} key</span></div></div>
+            {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
+              <div className="compare-tabs">{([['all', 'Semua', compareRows.length], ['same', 'Sama', compareRows.filter(row => row.status === 'same').length], ['different', 'Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
+            {compareResult ? (compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).length ? <div className="change-list">{compareRows.filter(row => compareView === 'all' || (compareView === 'same' ? row.status === 'same' : row.status !== 'same')).map((row, i) => <div className="change-item" key={i}>
+              <span className={`status-tag ${row.status}`}>{row.status === 'same' ? 'SAMA' : row.status === 'changed' ? 'BERUBAH' : row.status === 'only_left' ? 'HANYA SUMBER' : 'HANYA PEMBANDING'}</span>
+              <strong>{Object.values(row.key).join(' · ')}</strong>{row.changed_fields.length > 0 && <small>Field berbeda: {row.changed_fields.join(', ')}</small>}
+              {row.status !== 'same' && <div className="change-values"><pre>{JSON.stringify(row.left, null, 2)}</pre><ArrowRight size={16} /><pre>{JSON.stringify(row.right, null, 2)}</pre></div>}</div>)}</div>
+              : <div className="empty-state"><strong>Tidak ada baris pada kategori ini</strong></div>)
+              : <div className="empty-state"><div className="empty-illustration"><GitCompareArrows size={27} /></div><strong>Belum ada perbandingan</strong><p>Pilih dua server, tabel, dan parameter filter bila diperlukan.</p></div>}</div></>}
         {tab === 'credentials' && <><div className="page-heading"><div><span className="eyebrow">SECURE ACCESS</span><h1>Kredensial SAP</h1>
-          <p>Kelola akses SAP pribadi Anda melalui vault OIDC pusat.</p></div></div>
-          <div className="credentials-layout"><section className="card"><div className="section-head"><div><span className="icon-tile blue"><ShieldCheck size={18} /></span><strong>Status Koneksi</strong></div></div>
-            {servers.map(server => { const cred = credentials.find(c => c.connectionId === server.id)
-              return <div className="credential-row" key={server.id}><div className="server-icon"><Database size={19} /></div>
-                <div><strong>{server.label}</strong><small>{server.environment || server.resource_key}</small></div>
-                <span className={`credential-status ${cred?.hasCredential ? 'ready' : ''}`}>{cred?.hasCredential ? 'Tersimpan' : 'Belum diatur'}</span>
-                {cred?.hasCredential && <button className="icon-button" title="Hapus kredensial" onClick={() => removeCredential(server.id)}><Trash2 size={15} /></button>}</div> })}
-            {!servers.length && <div className="empty-small">Tidak ada server SAP pada katalog.</div>}</section>
-            <section className="card"><div className="section-head"><div><span className="icon-tile purple"><KeyRound size={18} /></span><strong>Tambah / Ubah Kredensial</strong></div></div>
-              <form className="credential-form" onSubmit={saveCredential}><label>Target SAP<select value={credTarget} onChange={e => setCredTarget(e.target.value)}>{servers.map(s => <option value={s.id} key={s.id}>{s.label}</option>)}</select></label>
-                <label>Username SAP<input autoComplete="off" value={sapUsername} onChange={e => setSapUsername(e.target.value)} required placeholder="SAP_USERNAME" /></label>
-                <label>Password SAP<input type="password" autoComplete="new-password" value={sapPassword} onChange={e => setSapPassword(e.target.value)} required placeholder="••••••••••" /></label>
-                <div className="secure-note"><ShieldCheck size={17} /> Password dikirim ke vault OIDC dan tidak disimpan di Lumina.</div>
-                <button className="button primary" disabled={busy || !credTarget}><Save size={16} /> Simpan ke Vault</button></form></section></div></>}
-        {tab === 'ai' && <><div className="page-heading"><div><span className="eyebrow">LOCAL AI ASSISTANT</span><h1>Asisten Query</h1>
-          <p>Jelaskan laporan yang diinginkan. Draf selalu ditinjau sebelum dijalankan.</p></div>
-          <span className="tiny-pill">{aiModel || 'Memeriksa model…'}</span></div>
-          <section className="card ai-card"><div className="section-head"><div><span className="icon-tile purple"><WandSparkles size={18} /></span><strong>Buat Draf Query</strong></div></div>
-            <div className="ai-body"><label>Permintaan Anda<textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
-              placeholder="Contoh: Buat laporan material dari MARA dengan field MATNR, MTART, dan MEINS di server DEV…" rows={5} /></label>
-              <p>Model menerima deskripsi dan struktur query saat ini. Data hasil SAP dan token OIDC tidak dikirim ke model.</p>
-              <button className="button primary" onClick={generateDraft} disabled={busy || aiPrompt.trim().length < 5}>
-                <WandSparkles size={16} />{busy ? 'Membuat draf…' : 'Buat Draf'}</button></div></section>
-          {aiDraft && <section className="card ai-draft"><div className="section-head"><div><span className="icon-tile green"><Table2 size={18} /></span><strong>Draf untuk Ditinjau</strong></div>
-            <span className="tiny-pill">Belum dieksekusi</span></div>
-            <div className="ai-body"><p>{aiDraft.explanation || 'Periksa tabel, fields, filter, dan join sebelum menjalankan.'}</p>
-              <div className="draft-summary"><div><small>SERVER</small><strong>{servers.find(s => s.id === aiDraft.query.target)?.label || aiDraft.query.target}</strong></div>
-                <div><small>TABEL</small><strong>{aiDraft.query.sources.map(s => s.table_name).join(' + ')}</strong></div>
-                <div><small>BATAS BARIS</small><strong>{aiDraft.query.rowcount}</strong></div></div>
-              <pre className="draft-json">{JSON.stringify(aiDraft.query, null, 2)}</pre>
-              <button className="button primary" onClick={() => {
-                setQuery(aiDraft.query); setFieldText({}); setTab('builder'); setAiDraft(null); setNotice('Draf dimuat. Tinjau lalu jalankan query.')
-              }}><ArrowRight size={16} /> Terapkan ke Builder</button></div></section>}</>}
+          <p>Kelola akses SAP pribadi Anda melalui vault OIDC pusat. Setiap target server dapat ditambahkan atau diperbarui kredensialnya.</p></div></div>
+          <div className="credentials-layout"><section className="card"><div className="section-head"><div><span className="icon-tile blue"><ShieldCheck size={18} /></span><strong>Daftar Server SAP</strong></div>
+            <span className="count-pill">{servers.length} server</span></div>
+            {servers.map(server => {
+              const cred = credentials.find(c => c.connectionId === server.id)
+              const hasCred = !!cred?.hasCredential
+              const isSelected = credTarget === server.id
+              return <div className={`credential-row ${isSelected ? 'selected-server' : ''}`} key={server.id}>
+                <div className="server-icon"><Database size={19} /></div>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <strong>{server.label}</strong>
+                    {hasCred && cred?.username && <span className="credential-user-badge">@{cred.username}</span>}
+                  </div>
+                  <small>{server.environment || server.resource_key}</small>
+                </div>
+                <span className={`credential-status ${hasCred ? 'ready' : ''}`}>
+                  {hasCred ? 'Tersimpan' : 'Belum diatur'}
+                </span>
+                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                  <button
+                    className="button subtle"
+                    style={{ padding: '0.35rem 0.65rem', height: '30px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}
+                    title={hasCred ? `Ubah kredensial ${server.label}` : `Atur kredensial ${server.label}`}
+                    onClick={() => editCredentialForServer(server)}
+                  >
+                    {hasCred ? <Edit2 size={13} /> : <Plus size={13} />}
+                    {hasCred ? 'Ubah' : 'Atur'}
+                  </button>
+                  {hasCred && (
+                    <button
+                      className="icon-button"
+                      title="Hapus kredensial dari vault"
+                      onClick={() => removeCredential(server.id)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            })}
+            {!servers.length && <div className="empty-small">Tidak ada server SAP pada katalog OIDC.</div>}</section>
+            <section className="card">
+              <div className="section-head">
+                <div>
+                  <span className="icon-tile purple"><KeyRound size={18} /></span>
+                  <strong>{credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Ubah Kredensial' : 'Tambah Kredensial'}</strong>
+                </div>
+                {credentials.find(c => c.connectionId === credTarget)?.hasCredential && (
+                  <span className="tiny-pill" style={{ color: '#2e976d', background: '#e8f8ef' }}>
+                    <CheckCircle2 size={12} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                    Sudah ada data
+                  </span>
+                )}
+              </div>
+              <form className="credential-form" onSubmit={saveCredential}>
+                <label>Target Server SAP
+                  <select value={credTarget} onChange={e => {
+                    const nextId = e.target.value
+                    setCredTarget(nextId)
+                    const existing = credentials.find(c => c.connectionId === nextId)
+                    setSapUsername(existing?.username || '')
+                    setSapPassword('')
+                  }}>
+                    {servers.map(s => {
+                      const c = credentials.find(item => item.connectionId === s.id)
+                      return (
+                        <option value={s.id} key={s.id}>
+                          {s.label} {c?.hasCredential ? '✓ (Sudah ada)' : '(Belum diatur)'}
+                        </option>
+                      )
+                    })}
+                  </select>
+                </label>
+                <label>
+                  Username SAP
+                  <input
+                    autoComplete="off"
+                    value={sapUsername}
+                    onChange={e => setSapUsername(e.target.value)}
+                    required
+                    placeholder="Masukkan username SAP"
+                  />
+                </label>
+                <label>
+                  Password SAP
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={sapPassword}
+                    onChange={e => setSapPassword(e.target.value)}
+                    required
+                    placeholder={credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Ketik password baru untuk memperbarui' : '••••••••••'}
+                  />
+                </label>
+                <div className="secure-note">
+                  <ShieldCheck size={17} />
+                  <span>Kredensial disimpan terenkripsi di vault OIDC pusat (bukan di database Lumina) dan digunakan saat mengakses RFC SAP.</span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button className="button primary" disabled={busy || !credTarget || !sapUsername.trim() || !sapPassword}>
+                    <Save size={16} />
+                    {credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Perbarui di Vault' : 'Simpan ke Vault'}
+                  </button>
+                  {credentials.find(c => c.connectionId === credTarget)?.hasCredential && (
+                    <button
+                      type="button"
+                      className="button subtle"
+                      style={{ color: '#c93b4a' }}
+                      onClick={() => removeCredential(credTarget)}
+                    >
+                      <Trash2 size={14} /> Hapus
+                    </button>
+                  )}
+                </div>
+              </form>
+            </section>
+          </div></>}
         {tab === 'schedules' && <><div className="page-heading"><div><span className="eyebrow">AUTOMATION</span><h1>Jadwal & Riwayat</h1>
           <p>Jalankan laporan tersimpan secara berkala dengan identitas OIDC Anda. Unduh hasil Excel dari riwayat.</p></div></div>
           <section className="card schedule-card"><div className="section-head"><div><span className="icon-tile blue"><Plus size={18} /></span><strong>Buat Jadwal</strong></div></div>
@@ -1170,6 +1357,120 @@ function App() {
               {confirmModal.confirmLabel || 'Lanjutkan'}
             </button>
           </div>
+        </div>
+      </div>
+    )}
+    {(changePasswordModal || !!user?.mustChangePassword) && (
+      <div
+        className="modal-backdrop"
+        onClick={() => {
+          if (!user?.mustChangePassword) {
+            setChangePasswordModal(false)
+          }
+        }}
+      >
+        <div className="modal-card password-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon purple"><Lock size={18} /></span>
+              <span>{user?.mustChangePassword ? 'Wajib Ganti Password Akun' : 'Ganti Password OIDC'}</span>
+            </div>
+            {!user?.mustChangePassword && (
+              <button
+                className="icon-button"
+                title="Tutup"
+                onClick={() => setChangePasswordModal(false)}
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
+          <form onSubmit={submitChangePassword}>
+            <div className="modal-body" style={{ display: 'grid', gap: '14px' }}>
+              {user?.mustChangePassword ? (
+                <div className="alert info" style={{ margin: 0, fontSize: '11px' }}>
+                  Akun Anda adalah pengguna baru atau baru saja di-reset. Demi keamanan, Anda <strong>wajib membuat password baru</strong> sebelum dapat melanjutkan. Tidak perlu memasukkan password lama/sementara.
+                </div>
+              ) : (
+                <p style={{ margin: 0, fontSize: '12px', color: '#687b92' }}>
+                  Perbarui kata sandi login OIDC Anda. Kata sandi ini berlaku untuk seluruh sistem Lumina.
+                </p>
+              )}
+
+              {changePasswordError && (
+                <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
+                  {changePasswordError}
+                </div>
+              )}
+
+              {!user?.mustChangePassword && (
+                <label style={{ display: 'grid', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#2b4466' }}>
+                  Password Saat Ini
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="Masukkan password saat ini"
+                    value={oldPassword}
+                    onChange={e => setOldPassword(e.target.value)}
+                    required
+                  />
+                </label>
+              )}
+
+              <label style={{ display: 'grid', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#2b4466' }}>
+                Password Baru (Minimal 6 karakter)
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="Masukkan password baru"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  required
+                  minLength={6}
+                />
+              </label>
+
+              <label style={{ display: 'grid', gap: '6px', fontSize: '11px', fontWeight: 600, color: '#2b4466' }}>
+                Konfirmasi Password Baru
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="Ulangi password baru"
+                  value={confirmPassword}
+                  onChange={e => setConfirmPassword(e.target.value)}
+                  required
+                  minLength={6}
+                />
+              </label>
+            </div>
+            <div className="modal-actions">
+              {!user?.mustChangePassword ? (
+                <button
+                  type="button"
+                  className="button subtle"
+                  onClick={() => setChangePasswordModal(false)}
+                >
+                  Batal
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="button subtle"
+                  onClick={doLogout}
+                  title="Keluar dari sesi ini"
+                >
+                  Keluar
+                </button>
+              )}
+              <button
+                type="submit"
+                className="button primary"
+                disabled={changePasswordLoading || !newPassword || !confirmPassword || (!user?.mustChangePassword && !oldPassword)}
+              >
+                {changePasswordLoading ? 'Menyimpan…' : 'Simpan Password Baru'}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     )}
