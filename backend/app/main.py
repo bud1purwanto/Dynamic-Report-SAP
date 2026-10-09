@@ -6,6 +6,7 @@ import io
 import json
 import re
 import secrets
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,50 @@ app.add_middleware(
 fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.session_secret.encode()).digest()))
 signer = URLSafeTimedSerializer(settings.session_secret, salt="lumina-session")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESOURCE_ACCESS_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+
+
+async def gateway_allows_resource(token: str, resource_key: str) -> bool | None:
+    """Ask the gateway policy without executing an SAP operation.
+
+    Its call_function policy resolves resource_key first, then rejects a missing
+    function name before forwarding anything to SAP.
+    """
+    cache_key = (hashlib.sha256(token.encode()).hexdigest(), resource_key)
+    cached = RESOURCE_ACCESS_CACHE.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.post(
+                settings.gateway_url,
+                json={"jsonrpc": "2.0", "id": secrets.token_hex(8), "method": "tools/call",
+                      "params": {"name": "mcp-sap__call_function",
+                                 "arguments": {"resource_key": resource_key, "function_name": ""}}},
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+        if response.status_code == 403:
+            allowed = False
+        elif response.status_code != 200:
+            return None
+        else:
+            payload = response.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            message = str(error.get("message", "")) if isinstance(error, dict) else ""
+            if message == "Missing function name":
+                allowed = True
+            elif ("not authorized for this client" in message or
+                  "No grant for server" in message or
+                  "No authorized resources" in message):
+                allowed = False
+            else:
+                return None
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return None
+    if len(RESOURCE_ACCESS_CACHE) >= 512:
+        RESOURCE_ACCESS_CACHE.clear()
+    RESOURCE_ACCESS_CACHE[cache_key] = (time.monotonic() + (60 if allowed else 5), allowed)
+    return allowed
 
 
 @app.on_event("startup")
@@ -276,6 +321,8 @@ async def user_catalog(token: str) -> list[dict[str, Any]]:
                     f"{settings.oidc_issuer}/v1/mcp/servers/{quote(server_id, safe='')}/connections",
                     headers={"Authorization": f"Bearer {token}"},
                 )
+                if res.status_code == 403:
+                    continue
                 fail_upstream(res, "Koneksi MCP")
                 connections.extend(res.json())
     except (httpx.HTTPError, ValueError, TypeError):
@@ -283,12 +330,19 @@ async def user_catalog(token: str) -> list[dict[str, Any]]:
     output = []
     for resource in resources:
         connection = next((c for c in connections if c.get("resourceKey") == resource.get("resource_key")), None)
+        if not connection or not connection.get("id"):
+            continue
         output.append({
             **resource,
-            "id": connection["id"] if connection else resource["resource_key"],
-            "connection_id": connection["id"] if connection else None,
+            "id": connection["id"],
+            "connection_id": connection["id"],
         })
-    return output
+    access = await asyncio.gather(*(
+        gateway_allows_resource(token, str(resource["resource_key"])) for resource in output
+    ))
+    if any(allowed is None for allowed in access):
+        raise HTTPException(503, "Izin resource SAP belum dapat diperiksa melalui MCP Gateway.")
+    return [resource for resource, allowed in zip(output, access) if allowed]
 
 
 def match_target(rows: list[dict[str, Any]], target: str) -> dict[str, Any]:

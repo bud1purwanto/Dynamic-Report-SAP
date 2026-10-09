@@ -130,11 +130,32 @@ function App() {
   const [compareTarget, setCompareTarget] = useState('')
   const [compareTable, setCompareTable] = useState('')
   const [compareFilters, setCompareFilters] = useState<Source['filters']>([])
+  const [compareMetadata, setCompareMetadata] = useState<StructureField[]>([])
+  const [compareMetadataLoading, setCompareMetadataLoading] = useState(false)
+  const [compareMetadataError, setCompareMetadataError] = useState('')
+  const [compareFieldSearch, setCompareFieldSearch] = useState('')
   const [compareRowcount, setCompareRowcount] = useState(100)
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
   const [compareRows, setCompareRows] = useState<{ key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }[]>([])
   const [compareView, setCompareView] = useState<'all' | 'same' | 'different'>('all')
   useEffect(() => { setCompareResult(null); setCompareRows([]) }, [compareTarget, otherTarget, compareTable, compareFilters, compareRowcount])
+  useEffect(() => {
+    setCompareMetadata([])
+    setCompareMetadataError('')
+    if (!compareTarget || !/^[A-Z_][A-Z0-9_]{1,29}$/.test(compareTable)) {
+      setCompareMetadataLoading(false)
+      return
+    }
+    let cancelled = false
+    setCompareMetadataLoading(true)
+    const timer = window.setTimeout(() => {
+      post<{ fields: StructureField[] }>('/sap/table-structure', { target: compareTarget, table_name: compareTable })
+        .then(result => { if (!cancelled) setCompareMetadata(result.fields || []) })
+        .catch(e => { if (!cancelled) setCompareMetadataError(message(e)) })
+        .finally(() => { if (!cancelled) setCompareMetadataLoading(false) })
+    }, 400)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [compareTarget, compareTable])
   const [credTarget, setCredTarget] = useState('')
   const [sapUsername, setSapUsername] = useState('')
   const [sapPassword, setSapPassword] = useState('')
@@ -156,7 +177,7 @@ function App() {
     confirmTone?: 'danger' | 'primary'
     onConfirm: () => void
   }>({ open: false, title: '', message: '', onConfirm: () => {} })
-  const [catalogModal, setCatalogModal] = useState<{ open: boolean; targetIndex?: number }>({ open: false })
+  const [catalogModal, setCatalogModal] = useState<{ open: boolean; targetIndex?: number; mode?: 'builder' | 'compare' }>({ open: false })
   const [catalogSearch, setCatalogSearch] = useState('')
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [catalogTables, setCatalogTables] = useState<{ name: string; description: string }[]>([])
@@ -174,13 +195,13 @@ function App() {
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState<TableFlowNode>([])
 
-  async function openTableCatalog(targetIndex?: number) {
-    setCatalogModal({ open: true, targetIndex })
+  async function openTableCatalog(targetIndex?: number, mode: 'builder' | 'compare' = 'builder') {
+    setCatalogModal({ open: true, targetIndex, mode })
     setCatalogSearch('')
     setCatalogLoading(true)
     try {
       const res = await post<{ tables: { name: string; description: string }[] }>('/sap/search-tables', {
-        target: query.target, query: '', limit: 30,
+        target: mode === 'compare' ? compareTarget : query.target, query: '', limit: 30,
       })
       setCatalogTables(res.tables || [])
     } catch (e) {
@@ -195,7 +216,7 @@ function App() {
     setCatalogLoading(true)
     try {
       const res = await post<{ tables: { name: string; description: string }[] }>('/sap/search-tables', {
-        target: query.target, query: q, limit: 30,
+        target: catalogModal.mode === 'compare' ? compareTarget : query.target, query: q, limit: 30,
       })
       setCatalogTables(res.tables || [])
     } catch (e) {
@@ -206,7 +227,11 @@ function App() {
   }
 
   function pickTableFromCatalog(tableName: string) {
-    if (catalogModal.targetIndex !== undefined) {
+    if (catalogModal.mode === 'compare') {
+      setCompareTable(tableName)
+      setCompareFilters([])
+      setCompareFieldSearch('')
+    } else if (catalogModal.targetIndex !== undefined) {
       updateSource(catalogModal.targetIndex, { table_name: tableName })
     } else {
       // Add as new table source if under 3
@@ -244,11 +269,13 @@ function App() {
       api<Credential[]>('/sap/credentials'),
     ])
     if (catalog.status === 'fulfilled') {
-      setServers(catalog.value.resources)
-      setQuery(q => ({ ...q, target: q.target || catalog.value.resources[0]?.id || '' }))
-      setCompareTarget(t => t || catalog.value.resources[0]?.id || '')
-      setCredTarget(t => t || catalog.value.resources[0]?.id || '')
-      setOtherTarget(t => t || catalog.value.resources[1]?.id || '')
+      const allowed = catalog.value.resources
+      const hasTarget = (id: string) => allowed.some(server => server.id === id)
+      setServers(allowed)
+      setQuery(q => ({ ...q, target: hasTarget(q.target) ? q.target : allowed[0]?.id || '' }))
+      setCompareTarget(t => hasTarget(t) ? t : allowed[0]?.id || '')
+      setCredTarget(t => hasTarget(t) ? t : allowed[0]?.id || '')
+      setOtherTarget(t => hasTarget(t) ? t : allowed.find(server => server.id !== (hasTarget(compareTarget) ? compareTarget : allowed[0]?.id))?.id || '')
     }
     if (saved.status === 'fulfilled') {
       setReports(saved.value)
@@ -553,6 +580,7 @@ function App() {
     if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return }
     if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return }
     if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return }
+    if (compareFilters.some(filter => !filter.value.trim())) { setError('Isi nilai untuk setiap parameter yang dipilih.'); return }
     if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return }
     setBusy(true); setError(''); setCompareResult(null); setCompareRows([])
     try {
@@ -624,7 +652,10 @@ function App() {
   }
 
   async function selectReport(report: Report) {
-    setQuery(report.definition); setActiveReport(report.id); setTab('builder')
+    const targetAllowed = servers.some(server => server.id === report.definition.target)
+    setQuery({ ...report.definition, target: targetAllowed ? report.definition.target : '' })
+    if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
+    setActiveReport(report.id); setTab('builder')
     setReportName(report.name)
     setFieldText({}); setStructureFields({}); setStructureKeys({}); setStructureText({})
     setData({ columns: [], rows: [] }); setVisibleColumns([])
@@ -943,6 +974,7 @@ function App() {
             </div></div>
           <div className="toolbar"><div className="field-group"><label>SERVER SAP</label>
             <select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>
+              <option value="">Pilih server yang diizinkan</option>
               {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></div>
             <div className="field-group narrow"><label>BATAS BARIS / TABEL</label>
               <input type="number" min={1} max={1000} value={query.rowcount} onChange={e => setQuery({ ...query, rowcount: Number(e.target.value) })} /></div>
@@ -1096,17 +1128,25 @@ function App() {
               <button className="button subtle" onClick={saveVariant}><Save size={14} /> Simpan layout</button></div>}</section>
         </>}
         {tab === 'compare' && <><div className="page-heading"><div><span className="eyebrow">DATA QUALITY</span><h1>Bandingkan Data</h1>
-          <p>Temukan perbedaan data tabel yang sama di dua server SAP.</p></div><button className="button primary" onClick={runCompare} disabled={busy}><GitCompareArrows size={16} /> Bandingkan</button></div>
-          <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={compareTarget} onChange={e => setCompareTarget(e.target.value)}>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
-            <GitCompareArrows size={22} /><label>SERVER PEMBANDING<select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label></div>
-            <div className="compare-options"><label>Tabel<input placeholder="MARA" value={compareTable} onChange={e => setCompareTable(e.target.value.toUpperCase())} /></label>
+          <p>Temukan perbedaan data tabel yang sama di dua server SAP.</p></div><button className="button primary" onClick={runCompare} disabled={busy || servers.length < 2}><GitCompareArrows size={16} /> Bandingkan</button></div>
+          {servers.length < 2 && <div className="alert error">Perbandingan memerlukan akses ke setidaknya dua server SAP. Periksa izin akun Anda.</div>}
+          <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={compareTarget} onChange={e => { setCompareTarget(e.target.value); setCompareFilters([]) }}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
+            <GitCompareArrows size={22} /><label>SERVER PEMBANDING<select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label></div>
+            <div className="compare-options"><label>Tabel<div className="compare-table-picker"><input placeholder="MARA" value={compareTable} onChange={e => { setCompareTable(e.target.value.toUpperCase()); setCompareFilters([]) }} /><button className="button subtle" onClick={() => openTableCatalog(undefined, 'compare')} disabled={!compareTarget} title="Cari di katalog tabel SAP"><BookOpen size={14} /> Katalog</button></div></label>
               <p>Semua field tabel dibandingkan. Key baris diambil otomatis dari struktur SAP pada kedua server.</p></div>
+            <div className="compare-field-panel"><div className="compare-field-heading"><div><strong>Kolom tabel</strong><small>Pilih kolom untuk dijadikan parameter filter. Semua kolom tetap dibandingkan.</small></div><input placeholder="Cari kolom…" value={compareFieldSearch} onChange={e => setCompareFieldSearch(e.target.value.toUpperCase())} disabled={!compareMetadata.length} /></div>
+              {compareMetadataLoading ? <span className="metadata-status">Memuat kolom tabel…</span> : compareMetadataError ? <span className="metadata-status">{compareMetadataError}</span> : compareMetadata.length ? <div className="compare-field-list">{compareMetadata.filter(field => field.name.includes(compareFieldSearch) || field.data_type.toUpperCase().includes(compareFieldSearch)).map(field => {
+                const selected = compareFilters.some(filter => filter.field === field.name)
+                return <label className="compare-field-choice" key={field.name}><input type="checkbox" checked={selected} disabled={!selected && compareFilters.length >= 10} onChange={e => setCompareFilters(current => e.target.checked ? [...current, { field: field.name, operator: 'EQ', value: '' }] : current.filter(filter => filter.field !== field.name))} />
+                  <span>{field.is_key ? '◆ ' : ''}{field.name}</span><small>{field.data_type}</small></label>
+              })}</div> : <span className="metadata-status">Isi nama tabel untuk melihat kolomnya.</span>}</div>
             <div className="compare-settings"><label>Batas baris per server<input type="number" min={1} max={1000} value={compareRowcount} onChange={e => setCompareRowcount(Number(e.target.value))} /></label>
-              <div className="compare-filter-panel"><div className="filter-heading"><span>FILTER (BERLAKU UNTUK KEDUA SERVER)</span><button className="text-button" disabled={compareFilters.length >= 10} onClick={() => setCompareFilters(current => [...current, { field: '', operator: 'EQ', value: '' }])}><Plus size={13} /> Tambah filter</button></div>
-                {compareFilters.map((filter, index) => <div className="filter-row" key={index}><input placeholder="Field" value={filter.field} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, field: e.target.value.toUpperCase() } : item))} />
+              <div className="compare-filter-panel"><div className="filter-heading"><span>PARAMETER FILTER (BERLAKU UNTUK KEDUA SERVER)</span></div>
+                {compareFilters.map((filter, index) => <div className="filter-row" key={filter.field}><strong>{filter.field}</strong>
                   <select value={filter.operator} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, operator: e.target.value } : item))}>{['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
                   <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
-                  <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}</div></div></div>
+                  <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}
+                {!compareFilters.length && <span className="metadata-status">Pilih kolom di atas untuk mengisi parameter.</span>}</div></div></div>
           <div className="card changes-card"><div className="section-head"><div><span className="icon-tile purple"><GitCompareArrows size={18} /></span><strong>Hasil Perbandingan</strong><span className="count-pill">{compareRows.length} key</span></div></div>
             {compareResult && <><div className={`compare-summary ${compareResult.complete ? '' : 'partial'}`}>{compareResult.left_count} baris sumber · {compareResult.right_count} baris pembanding · {compareResult.fields.length} field dibandingkan · key: {compareResult.key_fields.join(', ')} · {compareResult.complete ? 'Cakupan selesai.' : `Hasil mungkin parsial: salah satu server mencapai batas ${compareResult.row_limit} baris. Persempit data dengan filter.`}</div>
               <div className="compare-tabs">{([['all', 'Semua', compareRows.length], ['same', 'Sama', compareRows.filter(row => row.status === 'same').length], ['different', 'Berbeda', compareRows.filter(row => row.status !== 'same').length]] as const).map(([view, label, count]) => <button key={view} className={compareView === view ? 'active' : ''} onClick={() => setCompareView(view)}>{label} <span>{count}</span></button>)}</div></>}
@@ -1277,7 +1317,7 @@ function App() {
           </div>
           <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', paddingBottom: '0.4rem' }}>
             <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              Cari tabel SAP standard atau kustom dari Data Dictionary (DD02T). Klik tabel untuk langsung menggunakannya pada builder.
+              Cari tabel SAP standard atau kustom dari Data Dictionary (DD02T). Klik tabel untuk memilihnya.
             </p>
             <div className="catalog-search-wrap">
               <Search className="catalog-search-icon" size={16} />

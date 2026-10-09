@@ -13,6 +13,40 @@ from backend.app import main
 
 
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_catalog_only_returns_user_connections(self):
+        resources = [
+            {"serverId": "gateway", "kind": "sap", "resource_key": "sap:dev", "label": "DEV"},
+            {"serverId": "gateway", "kind": "sap", "resource_key": "sap:prd", "label": "PRD"},
+        ]
+        response = SimpleNamespace(status_code=200, json=lambda: [
+            {"id": "conn-dev", "resourceKey": "sap:dev"},
+            {"id": "conn-prd", "resourceKey": "sap:prd"}])
+        with patch.object(main, "catalog", AsyncMock(return_value=resources)), \
+             patch.object(main.httpx, "AsyncClient") as client_class, \
+             patch.object(main, "gateway_allows_resource", AsyncMock(side_effect=lambda _token, key: key == "sap:dev")):
+            client_class.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+            visible = await main.user_catalog("user-token")
+        self.assertEqual([item["resource_key"] for item in visible], ["sap:dev"])
+        with self.assertRaises(HTTPException):
+            main.match_target(visible, "sap:prd")
+
+    async def test_gateway_resource_probe_stops_before_sap_execution(self):
+        main.RESOURCE_ACCESS_CACHE.clear()
+        response = SimpleNamespace(status_code=200, json=lambda: {
+            "error": {"message": "Missing function name"}})
+        with patch.object(main.httpx, "AsyncClient") as client_class:
+            post = client_class.return_value.__aenter__.return_value.post = AsyncMock(return_value=response)
+            self.assertTrue(await main.gateway_allows_resource("user-token", "sap:dev"))
+            self.assertEqual(post.call_args.kwargs["json"]["params"]["arguments"],
+                             {"resource_key": "sap:dev", "function_name": ""})
+        main.RESOURCE_ACCESS_CACHE.clear()
+        denied = SimpleNamespace(status_code=200, json=lambda: {
+            "error": {"message": 'Forbidden: Resource key "sap:prd" is not authorized for this client'}})
+        with patch.object(main.httpx, "AsyncClient") as client_class:
+            client_class.return_value.__aenter__.return_value.post = AsyncMock(return_value=denied)
+            self.assertFalse(await main.gateway_allows_resource("user-token", "sap:prd"))
+        main.RESOURCE_ACCESS_CACHE.clear()
+
     async def test_compare_uses_all_metadata_fields_and_reports_same_and_different_rows(self):
         metadata = [
             {"name": "MANDT", "is_key": True},
