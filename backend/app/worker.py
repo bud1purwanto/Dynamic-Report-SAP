@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from .config import settings
 from .db import AppSession, Report, ReportRun, ReportSchedule, SessionLocal, init_db, utcnow
-from .main import QueryIn, execute_query, fernet, make_xlsx
+from .main import QueryIn, apply_report_presentation, execute_query, fernet, make_xlsx
 
 
 logger = logging.getLogger("lumina.worker")
@@ -89,10 +89,11 @@ async def execute_schedule(schedule_id: str) -> None:
             db.commit()
             query = QueryIn.model_validate(report.definition)
             result = await execute_query(query, access_token)
-            artifact = make_xlsx(result["rows"])
+            presented_rows = apply_report_presentation(result["rows"], report.definition.get("presentation"))
+            artifact = make_xlsx(presented_rows)
             schedule.last_status = "success"
             schedule.last_error = None
-            row_count = len(result["rows"])
+            row_count = len(presented_rows)
         except PermissionError as exc:
             schedule.enabled = False
             schedule.last_status = "needs_login"

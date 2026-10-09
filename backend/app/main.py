@@ -4,6 +4,7 @@ import ast
 import hashlib
 import io
 import json
+import math
 import re
 import secrets
 import time
@@ -139,10 +140,17 @@ class TableSearchIn(BaseModel):
 
 class PivotIn(BaseModel):
     rows: list[dict[str, Any]] = Field(max_length=10000)
-    index: str
+    index: list[str] | str
     columns: str
     values: str
     aggregation: str = "first"
+
+
+class CalculatedColumnIn(BaseModel):
+    rows: list[dict[str, Any]] = Field(max_length=10000)
+    name: str
+    operation: str
+    fields: list[str] = Field(min_length=1, max_length=12)
 
 
 class FormulaIn(BaseModel):
@@ -1101,22 +1109,91 @@ async def ai_draft_query(dto: AiDraftIn, auth: tuple[AppSession, str] = Depends(
 
 @app.post("/api/data/pivot")
 async def pivot(dto: PivotIn, auth: tuple[AppSession, str] = Depends(get_token)):
-    if dto.aggregation not in ("first", "sum", "count", "min", "max"):
+    return pivot_data(dto)
+
+
+def pivot_data(dto: PivotIn) -> dict[str, Any]:
+    if dto.aggregation not in ("first", "sum", "mean", "count", "min", "max"):
         raise HTTPException(422, "Agregasi tidak didukung.")
+    index_fields = [dto.index] if isinstance(dto.index, str) else dto.index
+    if not index_fields or len(index_fields) > 6 or len(set(index_fields)) != len(index_fields):
+        raise HTTPException(422, "Pilih 1–6 kolom Baris yang berbeda.")
     frame = pd.DataFrame(dto.rows)
-    for name in (dto.index, dto.columns, dto.values):
+    for name in (*index_fields, dto.columns, dto.values):
         if name not in frame.columns:
             raise HTTPException(422, f"Kolom {name} tidak ada.")
+    if dto.columns in index_fields or dto.values in index_fields or dto.values == dto.columns:
+        raise HTTPException(422, "Kolom Baris, Kolom, dan Nilai harus berbeda.")
     try:
+        if dto.aggregation in ("sum", "mean"):
+            frame[dto.values] = pd.to_numeric(frame[dto.values], errors="coerce")
+            if frame[dto.values].notna().sum() == 0:
+                raise ValueError("SUM dan AVERAGE memerlukan kolom Nilai berisi angka.")
         result = frame.pivot_table(
-            index=dto.index, columns=dto.columns, values=dto.values,
-            aggfunc=dto.aggregation, dropna=False,
+            index=index_fields, columns=dto.columns, values=dto.values,
+            aggfunc=dto.aggregation, observed=True, dropna=True, sort=False,
         ).reset_index()
         result.columns = [str(x) for x in result.columns]
         rows = json.loads(result.to_json(orient="records", date_format="iso"))
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, f"Pivot gagal: {exc}") from None
     return {"columns": list(result.columns), "rows": rows}
+
+
+@app.post("/api/data/calculated-column")
+async def calculated_column(dto: CalculatedColumnIn, auth: tuple[AppSession, str] = Depends(get_token)):
+    return calculated_column_data(dto)
+
+
+def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
+    if not IDENT.fullmatch(dto.name):
+        raise HTTPException(422, "Nama kolom hasil tidak valid.")
+    columns = list(dict.fromkeys(key for row in dto.rows for key in row))
+    if dto.name in columns:
+        raise HTTPException(422, "Nama kolom hasil sudah ada.")
+    if any(field not in columns for field in dto.fields) or len(set(dto.fields)) != len(dto.fields):
+        raise HTTPException(422, "Pilih kolom sumber yang tersedia dan berbeda.")
+    aggregate = dto.operation in ("sum", "average", "min", "max")
+    binary = dto.operation in ("subtract", "multiply", "divide")
+    if not aggregate and not binary or binary and len(dto.fields) != 2:
+        raise HTTPException(422, "Operasi atau jumlah kolom tidak valid.")
+    output = []
+    for row in dto.rows:
+        values = []
+        for field in dto.fields:
+            raw = row.get(field)
+            try:
+                parsed = float(raw) if raw not in (None, "") else None
+                values.append(parsed if parsed is not None and math.isfinite(parsed) else None)
+            except (TypeError, ValueError):
+                values.append(None)
+        numbers = [value for value in values if value is not None]
+        value = None
+        if aggregate and numbers:
+            value = {"sum": lambda: sum(numbers), "average": lambda: sum(numbers) / len(numbers),
+                     "min": lambda: min(numbers), "max": lambda: max(numbers)}[dto.operation]()
+        elif binary and all(value is not None for value in values):
+            left, right = values
+            if dto.operation == "subtract": value = left - right
+            if dto.operation == "multiply": value = left * right
+            if dto.operation == "divide" and right != 0: value = left / right
+        output.append({**row, dto.name: round(value, 6) if value is not None else None})
+    return {"columns": [*columns, dto.name], "rows": output}
+
+
+def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not presentation:
+        return rows
+    for calculation in presentation.get("calculatedColumns") or []:
+        rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+    pivot_config = presentation.get("pivot")
+    if pivot_config:
+        rows = pivot_data(PivotIn(rows=rows, index=pivot_config["rows"], columns=pivot_config["column"],
+                                  values=pivot_config["value"], aggregation=pivot_config["aggregation"]))["rows"]
+    visible = presentation.get("visibleColumns")
+    if visible:
+        rows = [{key: row.get(key) for key in visible if key in row} for row in rows]
+    return rows
 
 
 def evaluate_formula(node: ast.AST, values: dict[str, float]) -> float:

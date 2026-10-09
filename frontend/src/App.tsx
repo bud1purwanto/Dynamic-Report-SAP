@@ -12,7 +12,10 @@ import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
 
 type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
-type Report = { id: string; name: string; definition: Query }
+type PivotConfig = { rows: string[]; column: string; value: string; aggregation: string }
+type CalculatedColumn = { name: string; operation: string; fields: string[] }
+type ReportDefinition = Query & { presentation?: { pivot?: PivotConfig | null; calculatedColumns?: CalculatedColumn[]; visibleColumns?: string[] } }
+type Report = { id: string; name: string; definition: ReportDefinition }
 type Credential = { connectionId: string; target?: string; hasCredential: boolean; username?: string }
 type Variant = { id: string; name: string; layout: {
   columns: string[]
@@ -263,6 +266,9 @@ function App() {
   const [reports, setReports] = useState<Report[]>([])
   const [query, setQuery] = useState<Query>(initialQuery)
   const [data, setData] = useState<GridData>({ columns: [], rows: [] })
+  const [baseData, setBaseData] = useState<GridData>({ columns: [], rows: [] })
+  const [calculatedColumns, setCalculatedColumns] = useState<CalculatedColumn[]>([])
+  const [activePivot, setActivePivot] = useState<PivotConfig | null>(null)
   const [loginName, setLoginName] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [reportName, setReportName] = useState('')
@@ -270,18 +276,21 @@ function App() {
   const [variantName, setVariantName] = useState('')
   const [variants, setVariants] = useState<Variant[]>([])
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
+  const [columnChooserOpen, setColumnChooserOpen] = useState(false)
+  const [columnChooserSearch, setColumnChooserSearch] = useState('')
   const [resultPage, setResultPage] = useState(1)
   const [resultPageSize, setResultPageSize] = useState(25)
   const [resultSortCol, setResultSortCol] = useState<string | null>(null)
   const [resultSortDir, setResultSortDir] = useState<'asc' | 'desc'>('asc')
   const [pivotOpen, setPivotOpen] = useState(false)
-  const [pivotIndex, setPivotIndex] = useState('')
+  const [pivotRows, setPivotRows] = useState<string[]>([''])
   const [pivotColumn, setPivotColumn] = useState('')
   const [pivotValue, setPivotValue] = useState('')
   const [pivotAgg, setPivotAgg] = useState('first')
   const [formulaOpen, setFormulaOpen] = useState(false)
   const [formulaName, setFormulaName] = useState('')
-  const [formulaExpression, setFormulaExpression] = useState('')
+  const [formulaOperation, setFormulaOperation] = useState('sum')
+  const [formulaFields, setFormulaFields] = useState<string[]>([''])
   const [otherTarget, setOtherTarget] = useState('')
   const [compareTarget, setCompareTarget] = useState('')
   const [compareTable, setCompareTable] = useState('')
@@ -550,6 +559,13 @@ function App() {
       rowcount: 100,
     })
     setData({ columns: [], rows: [] })
+    setBaseData({ columns: [], rows: [] })
+    setCalculatedColumns([])
+    setActivePivot(null)
+    setPivotRows([''])
+    setPivotColumn('')
+    setPivotValue('')
+    setPivotAgg('first')
     setVisibleColumns([])
     setVariants([])
     setVariantName('')
@@ -738,7 +754,13 @@ function App() {
     try {
       const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
       const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
-      setData(result); setVisibleColumns(result.columns)
+      setBaseData(result)
+      const displayed = await applyPresentation(result, calculatedColumns, activePivot)
+      setData(displayed)
+      setVisibleColumns(current => {
+        const selected = displayed.columns.filter(column => current.includes(column))
+        return selected.length ? selected : displayed.columns
+      })
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
         (result.warnings?.length ? ` · ${result.warnings.join(' ')}` : ''))
       window.setTimeout(() => {
@@ -748,12 +770,28 @@ function App() {
     finally { setBusy(false) }
   }
 
+  async function applyPresentation(raw: GridData, calculations: CalculatedColumn[], pivot: PivotConfig | null): Promise<GridData> {
+    let result = raw
+    for (const column of calculations) {
+      result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
+    }
+    if (pivot) {
+      result = await post<GridData>('/data/pivot', { rows: result.rows, index: pivot.rows,
+        columns: pivot.column, values: pivot.value, aggregation: pivot.aggregation })
+    }
+    return result
+  }
+
   async function runPivot() {
+    const rows = pivotRows.filter(Boolean)
+    if (!rows.length || !pivotColumn || !pivotValue || new Set([...rows, pivotColumn, pivotValue]).size !== rows.length + 2) {
+      setError('Pilih field Baris, Kolom, dan Nilai yang berbeda.'); return
+    }
     setBusy(true); setError('')
     try {
-      const result = await post<GridData>('/data/pivot', {
-        rows: data.rows, index: pivotIndex, columns: pivotColumn, values: pivotValue, aggregation: pivotAgg,
-      })
+      const config = { rows, column: pivotColumn, value: pivotValue, aggregation: pivotAgg }
+      const result = await applyPresentation(baseData, calculatedColumns, config)
+      setActivePivot(config)
       setData(result); setVisibleColumns(result.columns); setPivotOpen(false)
       setNotice('Data berhasil di-pivot.')
     } catch (e) { setError(message(e)) }
@@ -761,13 +799,19 @@ function App() {
   }
 
   async function runFormula() {
+    const fields = formulaFields.filter(Boolean)
+    const binary = ['subtract', 'multiply', 'divide'].includes(formulaOperation)
+    if (!formulaName.trim() || (binary ? fields.length !== 2 : fields.length < 1) || new Set(fields).size !== fields.length) {
+      setError('Isi nama kolom dan pilih field sumber yang berbeda.'); return
+    }
     setBusy(true); setError('')
     try {
-      const result = await post<GridData>('/data/formula', {
-        rows: data.rows, name: formulaName.toUpperCase(), expression: formulaExpression,
-      })
+      const calculation = { name: formulaName.trim().toUpperCase(), operation: formulaOperation, fields }
+      const updated = [...calculatedColumns, calculation]
+      const result = await applyPresentation(baseData, updated, activePivot)
+      setCalculatedColumns(updated)
       setData(result); setVisibleColumns(result.columns)
-      setFormulaOpen(false); setFormulaName(''); setFormulaExpression('')
+      setFormulaOpen(false); setFormulaName(''); setFormulaFields([''])
       setNotice('Kolom formula ditambahkan.')
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
@@ -804,14 +848,15 @@ function App() {
     if (!name) { setError('Isi nama laporan.'); return }
     setBusy(true); setError('')
     try {
+      const definition: ReportDefinition = { ...query, presentation: { pivot: activePivot, calculatedColumns, visibleColumns } }
       if (activeReport) {
         const saved = await api<{ id: string }>(`/reports/${encodeURIComponent(activeReport)}`, {
-          method: 'PUT', body: JSON.stringify({ name, definition: query }),
+          method: 'PUT', body: JSON.stringify({ name, definition }),
         })
         setActiveReport(saved.id)
         setNotice(`Laporan "${name}" berhasil diperbarui.`)
       } else {
-        const saved = await post<{ id: string }>('/reports', { name, definition: query })
+        const saved = await post<{ id: string }>('/reports', { name, definition })
         setActiveReport(saved.id)
         setNotice(`Laporan "${name}" berhasil disimpan.`)
       }
@@ -825,7 +870,7 @@ function App() {
     if (!name) { setError('Isi nama laporan baru.'); return }
     setBusy(true); setError('')
     try {
-      const saved = await post<{ id: string }>('/reports', { name, definition: query })
+      const saved = await post<{ id: string }>('/reports', { name, definition: { ...query, presentation: { pivot: activePivot, calculatedColumns, visibleColumns } } })
       setActiveReport(saved.id)
       await loadWorkspace()
       setNotice(`Laporan baru "${name}" berhasil dibuat (Save As).`)
@@ -858,11 +903,18 @@ function App() {
     setRelationModal(null)
     const targetAllowed = servers.some(server => server.id === report.definition.target)
     setQuery({ ...report.definition, target: targetAllowed ? report.definition.target : '' })
+    const presentation = report.definition.presentation
+    setActivePivot(presentation?.pivot || null)
+    setCalculatedColumns(presentation?.calculatedColumns || [])
+    setPivotRows(presentation?.pivot?.rows?.length ? presentation.pivot.rows : [''])
+    setPivotColumn(presentation?.pivot?.column || '')
+    setPivotValue(presentation?.pivot?.value || '')
+    setPivotAgg(presentation?.pivot?.aggregation || 'first')
     if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
     setActiveReport(report.id); setTab('builder')
     setReportName(report.name)
     setFieldText({}); setStructureFields({}); setStructureKeys({}); setStructureText({})
-    setData({ columns: [], rows: [] }); setVisibleColumns([])
+    setData({ columns: [], rows: [] }); setBaseData({ columns: [], rows: [] }); setVisibleColumns(presentation?.visibleColumns || [])
     try { setVariants(await api<typeof variants>(`/reports/${report.id}/variants`)) }
     catch (e) { setError(message(e)) }
   }
@@ -957,7 +1009,7 @@ function App() {
       const res = await fetch('/api/data/export', {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: data.rows, mask_fields: [], drop_duplicates: false }),
+        body: JSON.stringify({ rows: data.rows.map(row => Object.fromEntries(visibleColumns.map(column => [column, row[column]]))), mask_fields: [], drop_duplicates: false }),
       })
       if (!res.ok) throw new Error('Ekspor gagal.')
       const url = URL.createObjectURL(await res.blob())
@@ -1102,6 +1154,7 @@ function App() {
   }
 
   const resultDescriptions = useMemo(() => Object.fromEntries(query.sources.flatMap(source => (structureFields[source.alias] || []).map(field => [`${source.alias}.${field.name}`, field.description || '']))), [query.sources, structureFields])
+  const sourceColumns = useMemo(() => [...baseData.columns, ...calculatedColumns.map(column => column.name)], [baseData.columns, calculatedColumns])
   const columns = useMemo<ColDef<Row>[]>(() => data.columns
     .filter(c => visibleColumns.includes(c))
     .map(c => ({
@@ -1469,22 +1522,26 @@ function App() {
           <section className="card results-card" ref={queryResultRef}><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
             <div className="results-actions">
               <button className="button subtle" onClick={scrollToTop} title="Kembali ke atas"><ArrowUp size={15} /> Ke Atas</button>
-              <button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!data.rows.length}><Plus size={16} /> Formula</button>
+              <button className="button subtle" onClick={() => setColumnChooserOpen(!columnChooserOpen)} disabled={!data.columns.length}><Columns3 size={16} /> Pilih Kolom</button>
+              <button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!baseData.rows.length}><Plus size={16} /> Kolom Hitung</button>
               <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><Settings2 size={16} /> Pivot Data</button>
               <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button>
             </div></div>
-            {formulaOpen && <div className="pivot-panel"><div className="pivot-title"><Plus size={16} /> Kolom formula</div>
-              <input placeholder="Nama kolom, contoh: TOTAL" value={formulaName} onChange={e => setFormulaName(e.target.value)} />
-              <input className="formula-input" placeholder="Contoh: [T1.NETWR] * 1.11" value={formulaExpression} onChange={e => setFormulaExpression(e.target.value)} />
-              <button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaExpression}>Terapkan</button></div>}
-            {pivotOpen && <div className="pivot-panel"><div className="pivot-title"><Settings2 size={16} /> Pivot data</div>
-              <select value={pivotIndex} onChange={e => setPivotIndex(e.target.value)}><option value="">Key / index</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
-              <select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Nama kolom baru</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
-              <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Nilai</option>{data.columns.map(c => <option key={c} value={c}>{c}{resultDescriptions[c] ? ` · ${resultDescriptions[c]}` : ''}</option>)}</select>
-              <select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}><option value="first">Nilai pertama</option><option value="sum">Jumlah</option><option value="count">Hitung</option><option value="min">Minimum</option><option value="max">Maksimum</option></select>
-              <button className="button primary" onClick={runPivot} disabled={!pivotIndex || !pivotColumn || !pivotValue}>Terapkan</button></div>}
-            {data.columns.length > 0 && <div className="column-picker"><span>Kolom:</span>{data.columns.map(c => <label key={c}><input type="checkbox" checked={visibleColumns.includes(c)}
-              onChange={e => setVisibleColumns(v => e.target.checked ? [...v, c] : v.filter(x => x !== c))} /><span title={[c, resultDescriptions[c]].filter(Boolean).join(' · ')}>{c}{resultDescriptions[c] && <small className="inline-description">{resultDescriptions[c]}</small>}</span></label>)}</div>}
+            {formulaOpen && <div className="designer-panel"><div className="designer-head"><div><strong>Kolom Hitung</strong><small>Hitung per baris dari kolom yang dipilih, tanpa menulis rumus. Untuk rata-rata antarbaris, gunakan AVERAGE di Pivot.</small></div></div>
+              <div className="designer-grid"><label>Nama kolom hasil<input placeholder="Contoh: RATA_RATA" value={formulaName} onChange={e => setFormulaName(e.target.value.toUpperCase())} /></label>
+                <label>Operasi<select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
+                  <option value="sum">SUM · Jumlah</option><option value="average">AVERAGE · Rata-rata</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option><option value="subtract">Kurang (−)</option><option value="multiply">Kali (×)</option><option value="divide">Bagi (÷)</option></select></label></div>
+              <div className="designer-fields"><strong>Kolom sumber</strong>{formulaFields.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih kolom {index + 1}</option>{sourceColumns.filter(column => column !== formulaName).map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>
+                {formulaFields.length > 1 && <button className="icon-button" title="Hapus kolom" onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button>}</div>)}
+                <button className="text-button" onClick={() => setFormulaFields(current => [...current, ''])} disabled={['subtract', 'multiply', 'divide'].includes(formulaOperation) ? formulaFields.length >= 2 : formulaFields.length >= 12}><Plus size={14} /> Tambah kolom sumber</button></div>
+              <div className="designer-actions"><button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaFields.every(Boolean) || (['subtract', 'multiply', 'divide'].includes(formulaOperation) && formulaFields.length !== 2)}>Buat kolom</button></div></div>}
+            {pivotOpen && <div className="designer-panel"><div className="designer-head"><div><strong>Pengaturan Pivot</strong><small>Seperti Excel: Baris mengelompokkan record, Kolom menjadi header, Nilai mengisi sel.</small></div>{activePivot && <span className="tiny-pill">Pivot aktif</span>}</div>
+              <div className="pivot-areas"><div className="pivot-area"><strong>Baris</strong><small>Satu baris untuk tiap kombinasi field</small>{pivotRows.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setPivotRows(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih field Baris</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>{pivotRows.length > 1 && <button className="icon-button" title="Hapus field Baris" onClick={() => setPivotRows(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button>}</div>)}<button className="text-button" onClick={() => setPivotRows(current => [...current, ''])} disabled={pivotRows.length >= 6}><Plus size={14} /> Tambah field Baris</button></div>
+                <div className="pivot-area"><strong>Kolom</strong><small>Contoh: nama karakteristik</small><select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Pilih field Kolom</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select></div>
+                <div className="pivot-area"><strong>Nilai</strong><small>Contoh: nilai karakteristik</small><select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Pilih field Nilai</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select><select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}><option value="first">Nilai pertama</option><option value="sum">SUM · Jumlah</option><option value="mean">AVERAGE · Rata-rata</option><option value="count">COUNT · Hitung</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option></select></div></div>
+              <div className="designer-actions">{activePivot && <button className="button subtle" onClick={async () => { const result = await applyPresentation(baseData, calculatedColumns, null); setActivePivot(null); setData(result); setVisibleColumns(result.columns); setNotice('Tampilan pivot dilepas.') }}>Lihat data asal</button>}<button className="button primary" onClick={runPivot} disabled={!pivotRows.every(Boolean) || !pivotColumn || !pivotValue}>Terapkan Pivot</button><button className="button subtle" onClick={saveReport} disabled={!activePivot || !reportName.trim()} title="Simpan pivot bersama laporan"><Save size={14} /> Simpan ke laporan</button></div></div>}
+            {data.columns.length > 0 && <div className="column-picker"><span>{visibleColumns.length} dari {data.columns.length} kolom tampil</span><button className="text-button" onClick={() => setColumnChooserOpen(!columnChooserOpen)}><Columns3 size={14} /> Atur kolom</button></div>}
+            {columnChooserOpen && data.columns.length > 0 && <div className="column-chooser"><div className="column-chooser-head"><input placeholder="Cari kolom…" value={columnChooserSearch} onChange={e => setColumnChooserSearch(e.target.value)} /><button className="text-button" onClick={() => setVisibleColumns(data.columns)}>Tampilkan semua</button></div><div className="column-chooser-list">{data.columns.filter(column => column.toLowerCase().includes(columnChooserSearch.toLowerCase()) || (resultDescriptions[column] || '').toLowerCase().includes(columnChooserSearch.toLowerCase())).map(column => <label key={column} title={[column, resultDescriptions[column]].filter(Boolean).join(' · ')}><input type="checkbox" checked={visibleColumns.includes(column)} onChange={e => setVisibleColumns(current => e.target.checked ? data.columns.filter(item => current.includes(item) || item === column) : current.length > 1 ? current.filter(item => item !== column) : current)} /><strong>{column}</strong>{resultDescriptions[column] && <small>{resultDescriptions[column]}</small>}</label>)}</div></div>}
             {data.rows.length ? (
               <div className="query-table-wrap">
                 <table className="report-matrix">

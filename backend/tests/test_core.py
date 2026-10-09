@@ -13,6 +13,36 @@ from backend.app import main
 
 
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pivot_keeps_material_batch_pairs_and_averages_numeric_values(self):
+        rows = [
+            {"MATNR": "A", "CHARG": "01", "NAME": "LENGTH", "VALUE": "10"},
+            {"MATNR": "A", "CHARG": "01", "NAME": "LENGTH", "VALUE": "20"},
+            {"MATNR": "B", "CHARG": "01", "NAME": "LENGTH", "VALUE": "30"},
+        ]
+        result = await main.pivot(main.PivotIn(rows=rows, index=["MATNR", "CHARG"],
+                                               columns="NAME", values="VALUE", aggregation="mean"), (None, ""))
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual([(row["MATNR"], row["LENGTH"]) for row in result["rows"]], [("A", 15.0), ("B", 30.0)])
+
+    async def test_calculated_column_uses_selected_fields_and_handles_division_by_zero(self):
+        rows = [{"A": "10", "B": "2"}, {"A": "5", "B": "0"}]
+        result = await main.calculated_column(main.CalculatedColumnIn(
+            rows=rows, name="RATIO", operation="divide", fields=["A", "B"]), (None, ""))
+        self.assertEqual([row["RATIO"] for row in result["rows"]], [5, None])
+
+    def test_saved_pivot_applies_to_scheduled_export_rows(self):
+        rows = [
+            {"MATNR": "A", "CHARG": "01", "NAME": "WIDTH", "VALUE": "10"},
+            {"MATNR": "A", "CHARG": "01", "NAME": "HEIGHT", "VALUE": "20"},
+            {"MATNR": "B", "CHARG": "01", "NAME": "WIDTH", "VALUE": "30"},
+        ]
+        presentation = {"pivot": {"rows": ["MATNR", "CHARG"], "column": "NAME",
+                                  "value": "VALUE", "aggregation": "first"},
+                        "visibleColumns": ["MATNR", "CHARG", "WIDTH"]}
+        result = main.apply_report_presentation(rows, presentation)
+        self.assertEqual(result, [{"MATNR": "A", "CHARG": "01", "WIDTH": "10"},
+                                  {"MATNR": "B", "CHARG": "01", "WIDTH": "30"}])
+
     async def test_structure_uses_sap_ddic_position_instead_of_alphabetical_order(self):
         structure = {"structuredContent": {"fields": [
             {"name": "ZZ_FIELD", "is_key": False},
