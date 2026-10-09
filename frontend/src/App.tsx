@@ -19,6 +19,17 @@ type Variant = { id: string; name: string; layout: {
   columnState?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getColumnState']>
   filterModel?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getFilterModel']>
 } }
+type CompareVariant = {
+  id: string
+  name: string
+  config: {
+    target: string
+    other_target: string
+    table_name: string
+    rowcount: number
+    filters: Source['filters']
+  }
+}
 type Tab = 'builder' | 'compare' | 'credentials' | 'schedules'
 type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
@@ -138,6 +149,9 @@ function App() {
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
   const [compareRows, setCompareRows] = useState<{ key: Row; status: string; changed_fields: string[]; left: Row | null; right: Row | null }[]>([])
   const [compareView, setCompareView] = useState<'all' | 'same' | 'different'>('all')
+  const [compareVariants, setCompareVariants] = useState<CompareVariant[]>([])
+  const [compareVariantName, setCompareVariantName] = useState('')
+  const [activeCompareVariant, setActiveCompareVariant] = useState('')
   useEffect(() => { setCompareResult(null); setCompareRows([]) }, [compareTarget, otherTarget, compareTable, compareFilters, compareRowcount])
   useEffect(() => {
     setCompareMetadata([])
@@ -263,10 +277,11 @@ function App() {
   }
 
   async function loadWorkspace() {
-    const [catalog, saved, creds] = await Promise.allSettled([
+    const [catalog, saved, creds, compVariants] = await Promise.allSettled([
       api<{ resources: Server[] }>('/sap/servers'),
       api<Report[]>('/reports'),
       api<Credential[]>('/sap/credentials'),
+      api<CompareVariant[]>('/compare-variants'),
     ])
     if (catalog.status === 'fulfilled') {
       const allowed = catalog.value.resources
@@ -282,7 +297,8 @@ function App() {
       setActiveReport(cur => saved.value.some(r => r.id === cur) ? cur : '')
     }
     if (creds.status === 'fulfilled') setCredentials(creds.value)
-    const failed = [catalog, saved, creds].find(x => x.status === 'rejected')
+    if (compVariants.status === 'fulfilled') setCompareVariants(compVariants.value)
+    const failed = [catalog, saved, creds, compVariants].find(x => x.status === 'rejected')
     if (failed?.status === 'rejected') setError(message(failed.reason))
   }
 
@@ -688,6 +704,64 @@ function App() {
       }
       if (variant.layout.filterModel) gridRef.current?.api.setFilterModel(variant.layout.filterModel)
     }, 50)
+  }
+
+  async function saveCompareVariant() {
+    const name = compareVariantName.trim()
+    if (!name) { setError('Isi nama variant perbandingan.'); return }
+    if (!compareTarget || !otherTarget || !compareTable) {
+      setError('Pilih server sumber, server pembanding, dan tabel terlebih dahulu.')
+      return
+    }
+    setBusy(true); setError('')
+    try {
+      const config = {
+        target: compareTarget,
+        other_target: otherTarget,
+        table_name: compareTable,
+        rowcount: compareRowcount,
+        filters: compareFilters,
+      }
+      await post('/compare-variants', { name, config })
+      setCompareVariants(await api<CompareVariant[]>('/compare-variants'))
+      setCompareVariantName('')
+      setNotice(`Variant perbandingan "${name}" berhasil disimpan.`)
+    } catch (e) { setError(message(e)) }
+    finally { setBusy(false) }
+  }
+
+  function applyCompareVariant(variantId: string) {
+    setActiveCompareVariant(variantId)
+    const variant = compareVariants.find(v => v.id === variantId)
+    if (!variant) return
+    const cfg = variant.config
+    setCompareTarget(cfg.target || '')
+    setOtherTarget(cfg.other_target || '')
+    setCompareTable(cfg.table_name || '')
+    setCompareRowcount(cfg.rowcount || 100)
+    setCompareFilters(cfg.filters || [])
+    setNotice(`Variant "${variant.name}" dimuat.`)
+  }
+
+  function deleteCompareVariant(variantId: string, name: string) {
+    showConfirm({
+      title: 'Hapus Variant Perbandingan',
+      message: `Hapus variant perbandingan "${name}"? Tindakan ini tidak dapat dibatalkan.`,
+      confirmLabel: 'Hapus Variant',
+      confirmTone: 'danger',
+      onConfirm: async () => {
+        setBusy(true); setError('')
+        try {
+          await api(`/compare-variants/${encodeURIComponent(variantId)}`, { method: 'DELETE' })
+          if (activeCompareVariant === variantId) {
+            setActiveCompareVariant('')
+          }
+          setCompareVariants(await api<CompareVariant[]>('/compare-variants'))
+          setNotice(`Variant "${name}" berhasil dihapus.`)
+        } catch (e) { setError(message(e)) }
+        finally { setBusy(false) }
+      },
+    })
   }
 
   async function exportData() {
@@ -1128,8 +1202,61 @@ function App() {
               <button className="button subtle" onClick={saveVariant}><Save size={14} /> Simpan layout</button></div>}</section>
         </>}
         {tab === 'compare' && <><div className="page-heading"><div><span className="eyebrow">DATA QUALITY</span><h1>Bandingkan Data</h1>
-          <p>Temukan perbedaan data tabel yang sama di dua server SAP.</p></div><button className="button primary" onClick={runCompare} disabled={busy || servers.length < 2}><GitCompareArrows size={16} /> Bandingkan</button></div>
+          <p>Temukan perbedaan data tabel yang sama di dua server SAP. Simpan parameter perbandingan sebagai variant untuk digunakan kembali.</p></div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="button primary" onClick={runCompare} disabled={busy || servers.length < 2}><GitCompareArrows size={16} /> Bandingkan</button>
+          </div></div>
           {servers.length < 2 && <div className="alert error">Perbandingan memerlukan akses ke setidaknya dua server SAP. Periksa izin akun Anda.</div>}
+
+          <div className="card compare-variant-toolbar" style={{ padding: '14px 20px', marginBottom: '18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: '280px' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 700, color: '#314e75' }}>
+                <Layers3 size={16} style={{ color: '#4477c7' }} /> Variant Tersimpan:
+              </span>
+              <select
+                style={{ height: '34px', fontSize: '11px', minWidth: '180px' }}
+                value={activeCompareVariant}
+                onChange={e => applyCompareVariant(e.target.value)}
+              >
+                <option value="">Pilih variant tersimpan ({compareVariants.length})</option>
+                {compareVariants.map(v => (
+                  <option key={v.id} value={v.id}>
+                    {v.name} ({v.config.table_name || 'Tabel'} · {v.config.target || ''})
+                  </option>
+                ))}
+              </select>
+              {activeCompareVariant && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="Hapus variant ini"
+                  onClick={() => {
+                    const cur = compareVariants.find(v => v.id === activeCompareVariant)
+                    if (cur) deleteCompareVariant(cur.id, cur.name)
+                  }}
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                style={{ height: '34px', fontSize: '11px', width: '210px' }}
+                placeholder="Nama variant (contoh: Cek MCH1 AIX-PRD)"
+                value={compareVariantName}
+                onChange={e => setCompareVariantName(e.target.value)}
+              />
+              <button
+                type="button"
+                className="button subtle"
+                onClick={saveCompareVariant}
+                disabled={busy || !compareTable}
+                title="Simpan parameter server, tabel, filter, dan limit saat ini"
+              >
+                <Save size={14} /> Simpan Variant
+              </button>
+            </div>
+          </div>
           <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={compareTarget} onChange={e => { setCompareTarget(e.target.value); setCompareFilters([]) }}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
             <GitCompareArrows size={22} /><label>SERVER PEMBANDING<select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label></div>
             <div className="compare-options"><label>Tabel<div className="compare-table-picker"><input placeholder="MARA" value={compareTable} onChange={e => { setCompareTable(e.target.value.toUpperCase()); setCompareFilters([]) }} /><button className="button subtle" onClick={() => openTableCatalog(undefined, 'compare')} disabled={!compareTarget} title="Cari di katalog tabel SAP"><BookOpen size={14} /> Katalog</button></div></label>

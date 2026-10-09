@@ -27,7 +27,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import AppSession, Report, ReportRun, ReportSchedule, Variant, get_db, init_db, utcnow
+from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, Variant, get_db, init_db, utcnow
 
 
 app = FastAPI(title="Lumina Dynamic Report", version="0.1.0")
@@ -196,6 +196,11 @@ class ReportIn(BaseModel):
 class VariantIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     layout: dict[str, Any]
+
+
+class CompareVariantIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    config: dict[str, Any]
 
 
 class ExportIn(BaseModel):
@@ -1216,6 +1221,37 @@ async def create_variant(report_id: str, dto: VariantIn, auth: tuple[AppSession,
     db.add(row)
     db.commit()
     return {"id": row.id, "name": row.name}
+
+
+@app.get("/api/compare-variants")
+async def list_compare_variants(auth: tuple[AppSession, str] = Depends(get_token),
+                                db: Session = Depends(get_db)):
+    variants = db.scalars(
+        select(CompareVariant)
+        .where(CompareVariant.owner_id == auth[0].user_id)
+        .order_by(CompareVariant.created_at.desc())
+    ).all()
+    return [{"id": v.id, "name": v.name, "config": v.config, "created_at": v.created_at.isoformat()} for v in variants]
+
+
+@app.post("/api/compare-variants")
+async def create_compare_variant(dto: CompareVariantIn, auth: tuple[AppSession, str] = Depends(get_token),
+                                 db: Session = Depends(get_db)):
+    row = CompareVariant(owner_id=auth[0].user_id, name=dto.name, config=dto.config)
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "name": row.name, "config": row.config}
+
+
+@app.delete("/api/compare-variants/{variant_id}")
+async def delete_compare_variant(variant_id: str, auth: tuple[AppSession, str] = Depends(get_token),
+                                 db: Session = Depends(get_db)):
+    row = db.get(CompareVariant, variant_id)
+    if not row or row.owner_id != auth[0].user_id:
+        raise HTTPException(404, "Variant perbandingan tidak ditemukan.")
+    db.delete(row)
+    db.commit()
+    return {"success": True}
 
 
 @app.get("/api/report-runs")
