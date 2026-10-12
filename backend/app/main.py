@@ -194,7 +194,7 @@ class JoinIn(BaseModel):
 
 class QueryIn(BaseModel):
     target: str
-    sources: list[SourceIn] = Field(min_length=1, max_length=3)
+    sources: list[SourceIn] = Field(min_length=1, max_length=50)
     joins: list[JoinIn] = []
     rowcount: int = Field(default=100, ge=1, le=50000)
     report_id: str | None = None

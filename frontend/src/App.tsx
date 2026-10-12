@@ -744,8 +744,10 @@ function App() {
   }
 
   function addSource() {
-    if (query.sources.length >= 3) return
-    const nextIndex = [0, 1, 2].find(index => !query.sources.some(source => source.alias === `T${index + 1}`))!
+    let nextIndex = 0
+    while (query.sources.some(source => source.alias === `T${nextIndex + 1}`)) {
+      nextIndex++
+    }
     const next = blankSource(nextIndex)
     setQuery(q => ({
       ...q,
@@ -1746,7 +1748,7 @@ function App() {
                     <button className="text-button" onClick={() => openTableCatalog()} title="Buka katalog tabel SAP">
                       <BookOpen size={14} /> Katalog
                     </button>
-                    <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}>
+                    <button className="text-button" onClick={addSource}>
                       <Plus size={15} /> Tambah
                     </button>
                     <button
@@ -2614,7 +2616,6 @@ function App() {
                 className="button primary"
                 style={{ height: '30px', fontSize: '11px', padding: '0 9px', gap: '4px' }}
                 onClick={addSource}
-                disabled={query.sources.length >= 3}
               >
                 <Plus size={13} /> Tambah Tabel
               </button>
