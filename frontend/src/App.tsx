@@ -830,14 +830,14 @@ function App() {
     }
   }
 
-  async function runQuery() {
+  async function runQuery(): Promise<boolean> {
     if (!query.sources.some(source => source.fields.length)) {
       setError('Pilih setidaknya satu kolom Tampil sebelum menjalankan query.')
-      return
+      return false
     }
     if (query.joins.some(join => !(join.conditions?.length || (join.left_field && join.right_field)))) {
       setError('Lengkapi relasi join antar tabel sebelum menjalankan query.')
-      return
+      return false
     }
     setBusy(true); setError(''); setNotice('')
     try {
@@ -873,7 +873,11 @@ function App() {
       window.setTimeout(() => {
         queryResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 100)
-    } catch (e) { setError(message(e)) }
+      return true
+    } catch (e) {
+      setError(message(e))
+      return false
+    }
     finally { setBusy(false) }
   }
 
@@ -982,11 +986,11 @@ function App() {
     }
   }
 
-  async function runCompare() {
-    if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return }
-    if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return }
-    if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return }
-    if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return }
+  async function runCompare(): Promise<boolean> {
+    if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return false }
+    if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return false }
+    if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return false }
+    if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return false }
     setBusy(true); setError(''); setCompareResult(null); setCompareRows([])
     try {
       const result = await post<NonNullable<typeof compareResult> & { rows: typeof compareRows }>(
@@ -1003,7 +1007,11 @@ function App() {
       window.setTimeout(() => {
         compareResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 100)
-    } catch (e) { setError(message(e)) }
+      return true
+    } catch (e) {
+      setError(message(e))
+      return false
+    }
     finally { setBusy(false) }
   }
 
@@ -2362,23 +2370,6 @@ function App() {
               : <div className="empty-small">Belum ada riwayat.</div>}</section></>}
       </div>
     </main>
-    {selectionDialog && <div className="modal-backdrop" onClick={() => setSelectionDialog(null)}>
-      <div className="modal-card selection-modal" role="dialog" aria-modal="true" aria-label={`Pilihan ganda ${selectionDialog.field}`} onClick={event => event.stopPropagation()}>
-        <div className="modal-head">
-          <div className="modal-title">
-            <span className="modal-title-icon blue"><Columns3 size={18} /></span>
-            <span>Pilihan ganda · {selectionDialog.tableName || (selectionDialog.sourceIndex !== undefined ? query.sources[selectionDialog.sourceIndex]?.table_name : '')}.{selectionDialog.field}</span>
-          </div>
-          <button className="icon-button" title="Tutup" onClick={() => setSelectionDialog(null)}><X size={18} /></button>
-        </div>
-        <div className="selection-tabs">{([
-          ['include_values', 'Nilai tunggal'], ['include_ranges', 'Interval'],
-          ['exclude_values', 'Kecualikan nilai'], ['exclude_ranges', 'Kecualikan interval'],
-        ] as [SelectionTab, string][]).map(([tab, label]) => <button key={tab} className={selectionDialog.tab === tab ? 'active' : ''} onClick={() => setSelectionDialog(current => current && { ...current, tab })}>{label}<span>{selectionDialog.entries[tab].split(/\r?\n/).filter(line => line.trim()).length}</span></button>)}</div>
-        <div className="selection-modal-body"><p>{selectionDialog.tab.endsWith('ranges') ? 'Satu interval per baris. Pisahkan nilai awal dan akhir dengan Tab, titik koma, atau koma.' : 'Tempel nomor batch dari Excel atau ketik satu nomor per baris. Koma dan Tab juga diterima.'}</p><textarea autoFocus spellCheck={false} placeholder={selectionDialog.tab.endsWith('ranges') ? '0000000001;0000000010\n0000000020;0000000030' : '0000366399\n0000366400\n0000366401'} value={selectionDialog.entries[selectionDialog.tab]} onChange={event => setSelectionDialog(current => current && { ...current, entries: { ...current.entries, [current.tab]: event.target.value } })} /><small>Maksimal 30 pilihan per tabel. Nomor dengan nol di depan tetap sebagai teks.</small></div>
-        <div className="selection-modal-actions"><button className="button subtle" onClick={() => setSelectionDialog(null)}>Batal</button><button className="button primary" onClick={saveSelectionDialog}>Terapkan pilihan</button></div>
-      </div>
-    </div>}
     {catalogModal.open && (
       <div className="modal-backdrop" onClick={() => setCatalogModal(c => ({ ...c, open: false }))}>
         <div className="modal-card catalog-modal" onClick={e => e.stopPropagation()}>
@@ -2461,7 +2452,7 @@ function App() {
       </div>
     )}
     {confirmModal.open && (
-      <div className="modal-backdrop" onClick={() => setConfirmModal(c => ({ ...c, open: false }))}>
+      <div className="modal-backdrop confirm-backdrop" onClick={() => setConfirmModal(c => ({ ...c, open: false }))}>
         <div className="modal-card" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <div className="modal-title">
@@ -2948,11 +2939,22 @@ function App() {
               <span className="modal-title-icon blue"><SlidersHorizontal size={18} /></span>
               <span>Parameter Filter Query</span>
             </div>
-            <button className="icon-button" title="Tutup" onClick={() => setParameterModalOpen(false)}>
+            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => setParameterModalOpen(false)}>
               <X size={16} />
             </button>
           </div>
           <div className="parameter-modal-body">
+            {busy && (
+              <div className="modal-loading-banner">
+                <span className="spinner" />
+                <span>Sedang mengeksekusi query ke server SAP… Mohon tunggu hingga proses selesai.</span>
+              </div>
+            )}
+            {error && (
+              <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
+                {error}
+              </div>
+            )}
             <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
               Tentukan nilai atau interval kriteria filter. Pilihan pada field yang sama digabung sebagai alternatif; field berbeda harus sama-sama terpenuhi.
             </small>
@@ -2963,17 +2965,17 @@ function App() {
                   <div className="parameter-group-head">
                     <strong>{source.table_name}.{field}</strong>
                     {meta?.description && <small>{meta.description}</small>}
-                    <button className="text-button" onClick={() => openSelectionDialog(sourceIndex, field)}>
+                    <button className="text-button" disabled={busy} onClick={() => openSelectionDialog(sourceIndex, field)}>
                       <Columns3 size={14} /> Pilihan ganda
                     </button>
                   </div>
                   {source.filters.map((filter, filterIndex) => filter.field !== field || source.filters.slice(0, filterIndex).filter(item => item.field === field).length >= 2 ? null : (
                     <div className="parameter-condition" key={`${field}-${filterIndex}`}>
-                      <select aria-label="Pilihan atau pengecualian" value={filter.sign || 'I'} onChange={e => updateFilter(sourceIndex, filterIndex, { sign: e.target.value as 'I' | 'E' })}>
+                      <select aria-label="Pilihan atau pengecualian" disabled={busy} value={filter.sign || 'I'} onChange={e => updateFilter(sourceIndex, filterIndex, { sign: e.target.value as 'I' | 'E' })}>
                         <option value="I">Pilih</option>
                         <option value="E">Kecualikan</option>
                       </select>
-                      <select aria-label="Operator" value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}>
+                      <select aria-label="Operator" disabled={busy} value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}>
                         <option value="EQ">Sama dengan</option>
                         <option value="BT">Interval</option>
                         <option value="NE">Tidak sama</option>
@@ -2984,6 +2986,7 @@ function App() {
                       </select>
                       <input
                         aria-label="Nilai awal"
+                        disabled={busy}
                         placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
                         value={filter.value}
                         onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })}
@@ -2993,6 +2996,7 @@ function App() {
                           <span className="parameter-range-separator">sampai</span>
                           <input
                             aria-label="Nilai akhir"
+                            disabled={busy}
                             placeholder="Sampai"
                             value={filter.high_value || ''}
                             onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: e.target.value })}
@@ -3002,6 +3006,7 @@ function App() {
                       <button
                         className="icon-button"
                         title="Hapus pilihan"
+                        disabled={busy}
                         aria-label={`Hapus pilihan ${field}`}
                         onClick={() => updateSource(sourceIndex, { filters: source.filters.filter((_, index) => index !== filterIndex) })}
                       >
@@ -3019,12 +3024,13 @@ function App() {
             }))}
           </div>
           <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
-            <button className="button subtle" onClick={() => setParameterModalOpen(false)}>
+            <button className="button subtle" disabled={busy} onClick={() => setParameterModalOpen(false)}>
               Batal
             </button>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 className="button subtle"
+                disabled={busy}
                 onClick={() => setParameterModalOpen(false)}
               >
                 Tutup & Simpan Nilai
@@ -3032,12 +3038,15 @@ function App() {
               <button
                 className="button primary"
                 disabled={busy || !query.target}
-                onClick={() => {
-                  setParameterModalOpen(false)
-                  runQuery()
+                onClick={async () => {
+                  const ok = await runQuery()
+                  if (ok) {
+                    setParameterModalOpen(false)
+                  }
                 }}
               >
-                <Play size={14} fill="currentColor" /> {busy ? 'Memproses…' : 'Jalankan Query'}
+                {busy ? <span className="spinner" /> : <Play size={14} fill="currentColor" />}
+                {busy ? 'Mengeksekusi Query…' : 'Jalankan Query'}
               </button>
             </div>
           </div>
@@ -3045,18 +3054,29 @@ function App() {
       </div>
     )}
     {compareParameterModalOpen && (
-      <div className="modal-backdrop" onClick={() => setCompareParameterModalOpen(false)}>
+      <div className="modal-backdrop" onClick={() => !busy && setCompareParameterModalOpen(false)}>
         <div className="modal-card parameter-modal" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <div className="modal-title">
               <span className="modal-title-icon purple"><SlidersHorizontal size={18} /></span>
               <span>Parameter Filter Perbandingan · {compareTable}</span>
             </div>
-            <button className="icon-button" title="Tutup" onClick={() => setCompareParameterModalOpen(false)}>
+            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => setCompareParameterModalOpen(false)}>
               <X size={16} />
             </button>
           </div>
           <div className="parameter-modal-body">
+            {busy && (
+              <div className="modal-loading-banner">
+                <span className="spinner" />
+                <span>Sedang mengambil & membandingkan data dari kedua server SAP… Mohon tunggu hingga proses selesai.</span>
+              </div>
+            )}
+            {error && (
+              <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
+                {error}
+              </div>
+            )}
             <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
               Tentukan nilai atau interval kriteria filter untuk perbandingan. Filter ini berlaku secara identik untuk server sumber ({servers.find(s => s.id === compareTarget)?.label || compareTarget}) dan server pembanding ({servers.find(s => s.id === otherTarget)?.label || otherTarget}).
             </small>
@@ -3067,7 +3087,7 @@ function App() {
                   <div className="parameter-group-head">
                     <strong>{compareTable}.{field}</strong>
                     {meta?.description && <small>{meta.description}</small>}
-                    <button className="text-button" onClick={() => openSelectionDialog(null, field, 'compare', compareTable)}>
+                    <button className="text-button" disabled={busy} onClick={() => openSelectionDialog(null, field, 'compare', compareTable)}>
                       <Columns3 size={14} /> Pilihan ganda
                     </button>
                   </div>
@@ -3075,6 +3095,7 @@ function App() {
                     <div className="parameter-condition" key={`${field}-${filterIndex}`}>
                       <select
                         aria-label="Pilihan atau pengecualian"
+                        disabled={busy}
                         value={filter.sign || 'I'}
                         onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, sign: e.target.value as 'I' | 'E' } : item))}
                       >
@@ -3083,6 +3104,7 @@ function App() {
                       </select>
                       <select
                         aria-label="Operator"
+                        disabled={busy}
                         value={filter.operator}
                         onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, operator: e.target.value } : item))}
                       >
@@ -3096,6 +3118,7 @@ function App() {
                       </select>
                       <input
                         aria-label="Nilai awal"
+                        disabled={busy}
                         placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
                         value={filter.value}
                         onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, value: e.target.value } : item))}
@@ -3105,6 +3128,7 @@ function App() {
                           <span className="parameter-range-separator">sampai</span>
                           <input
                             aria-label="Nilai akhir"
+                            disabled={busy}
                             placeholder="Sampai"
                             value={filter.high_value || ''}
                             onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, high_value: e.target.value } : item))}
@@ -3114,6 +3138,7 @@ function App() {
                       <button
                         className="icon-button"
                         title="Hapus pilihan"
+                        disabled={busy}
                         aria-label={`Hapus pilihan ${field}`}
                         onClick={() => setCompareFilters(current => current.filter((_, i) => i !== filterIndex))}
                       >
@@ -3136,12 +3161,13 @@ function App() {
             )}
           </div>
           <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
-            <button className="button subtle" onClick={() => setCompareParameterModalOpen(false)}>
+            <button className="button subtle" disabled={busy} onClick={() => setCompareParameterModalOpen(false)}>
               Batal
             </button>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 className="button subtle"
+                disabled={busy}
                 onClick={() => setCompareParameterModalOpen(false)}
               >
                 Tutup & Simpan Nilai
@@ -3149,15 +3175,37 @@ function App() {
               <button
                 className="button primary"
                 disabled={busy || servers.length < 2 || !compareTarget || !otherTarget || !compareTable}
-                onClick={() => {
-                  setCompareParameterModalOpen(false)
-                  runCompare()
+                onClick={async () => {
+                  const ok = await runCompare()
+                  if (ok) {
+                    setCompareParameterModalOpen(false)
+                  }
                 }}
               >
-                <GitCompareArrows size={14} /> {busy ? 'Memproses…' : 'Bandingkan Sekarang'}
+                {busy ? <span className="spinner" /> : <GitCompareArrows size={14} />}
+                {busy ? 'Membandingkan Data…' : 'Bandingkan Sekarang'}
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    )}
+    {selectionDialog && (
+      <div className="modal-backdrop selection-backdrop" onClick={() => setSelectionDialog(null)}>
+        <div className="modal-card selection-modal" role="dialog" aria-modal="true" aria-label={`Pilihan ganda ${selectionDialog.field}`} onClick={event => event.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Columns3 size={18} /></span>
+              <span>Pilihan ganda · {selectionDialog.tableName || (selectionDialog.sourceIndex !== undefined ? query.sources[selectionDialog.sourceIndex]?.table_name : '')}.{selectionDialog.field}</span>
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setSelectionDialog(null)}><X size={18} /></button>
+          </div>
+          <div className="selection-tabs">{([
+            ['include_values', 'Nilai tunggal'], ['include_ranges', 'Interval'],
+            ['exclude_values', 'Kecualikan nilai'], ['exclude_ranges', 'Kecualikan interval'],
+          ] as [SelectionTab, string][]).map(([tab, label]) => <button key={tab} className={selectionDialog.tab === tab ? 'active' : ''} onClick={() => setSelectionDialog(current => current && { ...current, tab })}>{label}<span>{selectionDialog.entries[tab].split(/\r?\n/).filter(line => line.trim()).length}</span></button>)}</div>
+          <div className="selection-modal-body"><p>{selectionDialog.tab.endsWith('ranges') ? 'Satu interval per baris. Pisahkan nilai awal dan akhir dengan Tab, titik koma, atau koma.' : 'Tempel nomor batch dari Excel atau ketik satu nomor per baris. Koma dan Tab juga diterima.'}</p><textarea autoFocus spellCheck={false} placeholder={selectionDialog.tab.endsWith('ranges') ? '0000000001;0000000010\n0000000020;0000000030' : '0000366399\n0000366400\n0000366401'} value={selectionDialog.entries[selectionDialog.tab]} onChange={event => setSelectionDialog(current => current && { ...current, entries: { ...current.entries, [current.tab]: event.target.value } })} /><small>Maksimal 30 pilihan per tabel. Nomor dengan nol di depan tetap sebagai teks.</small></div>
+          <div className="selection-modal-actions"><button className="button subtle" onClick={() => setSelectionDialog(null)}>Batal</button><button className="button primary" onClick={saveSelectionDialog}>Terapkan pilihan</button></div>
         </div>
       </div>
     )}
