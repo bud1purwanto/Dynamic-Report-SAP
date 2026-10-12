@@ -1226,8 +1226,12 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
         raise HTTPException(422, "Pilih kolom sumber yang tersedia dan berbeda.")
     aggregate = dto.operation in ("sum", "average", "min", "max")
     binary = dto.operation in ("subtract", "multiply", "divide")
-    if not aggregate and not binary or binary and len(dto.fields) != 2:
-        raise HTTPException(422, "Operasi atau jumlah kolom tidak valid.")
+    if not aggregate and not binary:
+        raise HTTPException(422, "Operasi kolom tidak valid.")
+    if dto.operation == "divide" and len(dto.fields) != 2:
+        raise HTTPException(422, "Operasi pembagian memerlukan tepat 2 kolom sumber.")
+    if len(dto.fields) < 2 and (binary or dto.operation in ("sum", "average")):
+        raise HTTPException(422, "Pilih minimal 2 kolom sumber.")
     output = []
     for row in dto.rows:
         values = []
@@ -1243,11 +1247,21 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
         if aggregate and numbers:
             value = {"sum": lambda: sum(numbers), "average": lambda: sum(numbers) / len(numbers),
                      "min": lambda: min(numbers), "max": lambda: max(numbers)}[dto.operation]()
-        elif binary and all(value is not None for value in values):
-            left, right = values
-            if dto.operation == "subtract": value = left - right
-            if dto.operation == "multiply": value = left * right
-            if dto.operation == "divide" and right != 0: value = left / right
+        elif binary and len(values) == len(dto.fields) and all(v is not None for v in values):
+            if dto.operation == "subtract":
+                # Chained subtraction: a - b - c ...
+                res = values[0]
+                for v in values[1:]:
+                    res -= v
+                value = res
+            elif dto.operation == "multiply":
+                # Chained multiplication: a * b * c ...
+                res = 1.0
+                for v in values:
+                    res *= v
+                value = res
+            elif dto.operation == "divide" and len(values) == 2 and values[1] != 0:
+                value = values[0] / values[1]
         output.append({**row, name: round(value, 6) if value is not None else None})
     return {"columns": [*columns, name], "rows": output}
 

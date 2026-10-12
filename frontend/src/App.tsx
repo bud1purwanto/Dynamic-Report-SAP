@@ -902,19 +902,32 @@ function App() {
 
   async function runFormula() {
     const fields = formulaFields.filter(Boolean)
-    const binary = ['subtract', 'multiply', 'divide'].includes(formulaOperation)
-    if (!formulaName.trim() || (binary ? fields.length !== 2 : fields.length < 1) || new Set(fields).size !== fields.length) {
-      setError('Isi nama kolom dan pilih field sumber yang berbeda.'); return
+    const name = formulaName.trim()
+    if (!name) {
+      setError('Isi nama kolom hasil.')
+      return
+    }
+    if (formulaOperation === 'divide' && fields.length !== 2) {
+      setError('Operasi pembagian (÷) memerlukan tepat 2 kolom sumber.')
+      return
+    }
+    if (fields.length < (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) ? 2 : 1)) {
+      setError('Pilih minimal 2 kolom sumber.')
+      return
+    }
+    if (new Set(fields).size !== fields.length) {
+      setError('Pilih kolom sumber yang berbeda.')
+      return
     }
     setBusy(true); setError('')
     try {
-      const calculation = { name: formulaName.trim().toUpperCase(), operation: formulaOperation, fields }
+      const calculation = { name, operation: formulaOperation, fields }
       const updated = [...calculatedColumns, calculation]
       const result = await applyPresentation(baseData, updated, activePivot)
       setCalculatedColumns(updated)
       setData(result); setVisibleColumns(result.columns)
       setFormulaOpen(false); setFormulaName(''); setFormulaFields([''])
-      setNotice('Kolom formula ditambahkan.')
+      setNotice(`Kolom "${name}" berhasil ditambahkan.`)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
@@ -1676,25 +1689,7 @@ function App() {
               <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><Settings2 size={16} /> Pivot Data</button>
               <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button>
             </div></div>
-            {formulaOpen && <div className="designer-panel"><div className="designer-head"><div><strong>Kolom Hitung</strong><small>Hitung per baris dari kolom yang dipilih, tanpa menulis rumus. Untuk rata-rata antarbaris, gunakan AVERAGE di Pivot.</small></div></div>
-              <div className="designer-grid"><label>Nama kolom hasil<input placeholder="Contoh: RATA_RATA" value={formulaName} onChange={e => setFormulaName(e.target.value.toUpperCase())} /></label>
-                <label>Operasi<select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
-                  <option value="sum">SUM · Jumlah</option><option value="average">AVERAGE · Rata-rata</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option><option value="subtract">Kurang (−)</option><option value="multiply">Kali (×)</option><option value="divide">Bagi (÷)</option></select></label></div>
-              <div className="designer-fields"><strong>Kolom sumber</strong>{formulaFields.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih kolom {index + 1}</option>{formulaSourceColumns.filter(column => column !== formulaName).map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>
-                {formulaFields.length > 1 && <button className="icon-button" title="Hapus kolom" onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button>}</div>)}
-                <button className="text-button" onClick={() => setFormulaFields(current => [...current, ''])} disabled={['subtract', 'multiply', 'divide'].includes(formulaOperation) ? formulaFields.length >= 2 : formulaFields.length >= 12}><Plus size={14} /> Tambah kolom sumber</button></div>
-              <div className="designer-actions"><button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaFields.every(Boolean) || (['subtract', 'multiply', 'divide'].includes(formulaOperation) && formulaFields.length !== 2)}>Buat kolom</button></div></div>}
-            {pivotOpen && <div className="designer-panel"><div className="designer-head"><div><strong>Pengaturan Pivot</strong><small>Seperti Excel: Baris mengelompokkan record, Kolom menjadi header, Nilai mengisi sel.</small></div>{activePivot && <span className="tiny-pill">Pivot aktif</span>}</div>
-              <div className="pivot-areas"><div className="pivot-area"><strong>Baris</strong><small>Satu baris untuk tiap kombinasi field</small>{pivotRows.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setPivotRows(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih field Baris</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>{pivotRows.length > 1 && <button className="icon-button" title="Hapus field Baris" onClick={() => setPivotRows(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button>}</div>)}<button className="text-button" onClick={() => setPivotRows(current => [...current, ''])} disabled={pivotRows.length >= 6}><Plus size={14} /> Tambah field Baris</button></div>
-                <div className="pivot-area"><strong>Kolom</strong><small>Contoh: nama karakteristik</small><select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}><option value="">Pilih field Kolom</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select></div>
-                <div className="pivot-area"><strong>Nilai</strong><small>Contoh: nilai karakteristik</small><select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Pilih field Nilai</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select><select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}><option value="first">Nilai pertama</option><option value="sum">SUM · Jumlah</option><option value="mean">AVERAGE · Rata-rata</option><option value="count">COUNT · Hitung</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option></select></div></div>
-              <div className="designer-actions">{activePivot && <button className="button subtle" onClick={async () => { const result = await applyPresentation(baseData, calculatedColumns, null); setActivePivot(null); setData(result); setVisibleColumns(result.columns); setNotice('Tampilan pivot dilepas.') }}>Lihat data asal</button>}<button className="button primary" onClick={runPivot} disabled={!pivotRows.every(Boolean) || !pivotColumn || !pivotValue}>Terapkan Pivot</button><button className="button subtle" onClick={saveReport} disabled={!activePivot || !reportName.trim()} title="Simpan pivot bersama laporan"><Save size={14} /> Simpan ke laporan</button></div></div>}
-            {data.columns.length > 0 && <div className="column-picker"><span>{visibleColumns.length} dari {data.columns.length} kolom tampil</span><button className="text-button" onClick={() => setColumnChooserOpen(!columnChooserOpen)}><Columns3 size={14} /> Atur kolom</button></div>}
-            {columnChooserOpen && data.columns.length > 0 && <div className="column-chooser">
-              <div className="column-chooser-head"><input placeholder="Cari kolom…" value={columnChooserSearch} onChange={e => setColumnChooserSearch(e.target.value)} /><div className="column-chooser-actions"><button className="text-button" onClick={() => setVisibleColumns(current => [...current.filter(c => data.columns.includes(c)), ...data.columns.filter(c => !current.includes(c))])}>Tampilkan semua</button><button className="text-button" onClick={() => setVisibleColumns(current => current.filter(c => data.columns.includes(c)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })))}>Urut A–Z</button><button className="text-button" onClick={() => setVisibleColumns(current => data.columns.filter(c => current.includes(c)))}>Urutan awal</button></div></div>
-              <p className="column-chooser-hint">Tarik ikon di samping nama kolom untuk mengatur urutan tabel. Klik judul tabel untuk mengurutkan baris.</p>
-              <div className="column-chooser-list">{[...visibleColumns.filter(column => data.columns.includes(column)), ...data.columns.filter(column => !visibleColumns.includes(column))].filter(column => column.toLowerCase().includes(columnChooserSearch.toLowerCase()) || (resultDescriptions[column] || '').toLowerCase().includes(columnChooserSearch.toLowerCase())).map(column => <div className={`column-chooser-item${draggedColumn === column ? ' is-dragging' : ''}${dropColumn === column ? ' is-drop-target' : ''}`} key={column} title={[column, resultDescriptions[column]].filter(Boolean).join(' · ')} onDragOver={event => { if (draggedColumn && draggedColumn !== column && visibleColumns.includes(column)) { event.preventDefault(); setDropColumn(column) } }} onDragLeave={() => setDropColumn(current => current === column ? null : current)} onDrop={event => { event.preventDefault(); if (draggedColumn) moveVisibleColumn(draggedColumn, column); setDraggedColumn(null); setDropColumn(null) }}><label><input type="checkbox" checked={visibleColumns.includes(column)} onChange={e => setVisibleColumns(current => e.target.checked ? [...current, column] : current.length > 1 ? current.filter(item => item !== column) : current)} /><strong>{column}</strong>{resultDescriptions[column] && <small>{resultDescriptions[column]}</small>}</label>{visibleColumns.includes(column) && <span className="column-drag-handle" draggable title={`Tarik untuk memindahkan ${column}`} aria-label={`Tarik untuk memindahkan ${column}`} onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', column); setDraggedColumn(column) }} onDragEnd={() => { setDraggedColumn(null); setDropColumn(null) }}><GripVertical size={15} /></span>}</div>)}</div>
-            </div>}
+            {data.columns.length > 0 && <div className="column-picker"><span>{visibleColumns.length} dari {data.columns.length} kolom tampil</span><button className="text-button" onClick={() => setColumnChooserOpen(true)}><Columns3 size={14} /> Atur kolom</button></div>}
             {data.rows.length ? (
               <div className="query-table-wrap">
                 <table className="report-matrix">
@@ -2302,6 +2297,332 @@ function App() {
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    )}
+    {formulaOpen && (
+      <div className="modal-backdrop" onClick={() => setFormulaOpen(false)}>
+        <div className="modal-card formula-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Plus size={18} /></span>
+              <span>Kolom Hitung</span>
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setFormulaOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div className="formula-modal-body">
+            <small style={{ color: '#687b92', fontSize: '11px' }}>
+              Hitung per baris dari kolom yang dipilih tanpa menulis rumus. Untuk rata-rata antarbaris, gunakan AVERAGE di Pivot.
+            </small>
+            <div className="designer-grid">
+              <label>
+                Nama kolom hasil
+                <input
+                  placeholder="Contoh: Total Berat atau RATA_RATA"
+                  value={formulaName}
+                  onChange={e => setFormulaName(e.target.value)}
+                />
+              </label>
+              <label>
+                Operasi
+                <select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
+                  <option value="sum">SUM · Jumlah</option>
+                  <option value="average">AVERAGE · Rata-rata</option>
+                  <option value="min">MIN · Terkecil</option>
+                  <option value="max">MAX · Terbesar</option>
+                  <option value="subtract">Kurang (−)</option>
+                  <option value="multiply">Kali (×)</option>
+                  <option value="divide">Bagi (÷)</option>
+                </select>
+              </label>
+            </div>
+            <div className="designer-fields">
+              <strong>Kolom sumber</strong>
+              {formulaFields.map((field, index) => (
+                <div className="designer-field-row" key={index}>
+                  <select
+                    value={field}
+                    onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}
+                  >
+                    <option value="">Pilih kolom {index + 1}</option>
+                    {formulaSourceColumns.filter(column => column !== formulaName).map(column => (
+                      <option key={column} value={column}>
+                        {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {formulaFields.length > 1 && (
+                    <button
+                      className="icon-button"
+                      title="Hapus kolom"
+                      onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                className="text-button"
+                onClick={() => setFormulaFields(current => [...current, ''])}
+                disabled={formulaOperation === 'divide' ? formulaFields.length >= 2 : formulaFields.length >= 12}
+              >
+                <Plus size={14} /> Tambah kolom sumber
+              </button>
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button className="button subtle" onClick={() => setFormulaOpen(false)}>Batal</button>
+            <button
+              className="button primary"
+              onClick={runFormula}
+              disabled={!formulaName.trim() || !formulaFields.every(Boolean) || (formulaOperation === 'divide' && formulaFields.length !== 2) || (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) && formulaFields.length < 2)}
+            >
+              Buat Kolom
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {pivotOpen && (
+      <div className="modal-backdrop" onClick={() => setPivotOpen(false)}>
+        <div className="modal-card pivot-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Settings2 size={18} /></span>
+              <span>Pengaturan Pivot</span>
+              {activePivot && <span className="tiny-pill" style={{ marginLeft: '8px' }}>Pivot aktif</span>}
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setPivotOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div className="pivot-modal-body">
+            <small style={{ color: '#687b92', fontSize: '11px' }}>
+              Seperti Excel: Baris mengelompokkan record, Kolom menjadi header baru, Nilai mengisi sel perpotongan.
+            </small>
+            <div className="pivot-areas">
+              <div className="pivot-area">
+                <strong>Baris</strong>
+                <small>Satu baris untuk tiap kombinasi field</small>
+                {pivotRows.map((field, index) => (
+                  <div className="designer-field-row" key={index}>
+                    <select
+                      value={field}
+                      onChange={e => setPivotRows(current => current.map((item, i) => i === index ? e.target.value : item))}
+                    >
+                      <option value="">Pilih field Baris</option>
+                      {sourceColumns.map(column => (
+                        <option key={column} value={column}>
+                          {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {pivotRows.length > 1 && (
+                      <button
+                        className="icon-button"
+                        title="Hapus field Baris"
+                        onClick={() => setPivotRows(current => current.filter((_, i) => i !== index))}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  className="text-button"
+                  onClick={() => setPivotRows(current => [...current, ''])}
+                  disabled={pivotRows.length >= 6}
+                >
+                  <Plus size={14} /> Tambah field Baris
+                </button>
+              </div>
+
+              <div className="pivot-area">
+                <strong>Kolom</strong>
+                <small>Contoh: nama karakteristik</small>
+                <select value={pivotColumn} onChange={e => setPivotColumn(e.target.value)}>
+                  <option value="">Pilih field Kolom</option>
+                  {sourceColumns.map(column => (
+                    <option key={column} value={column}>
+                      {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="pivot-area">
+                <strong>Nilai</strong>
+                <small>Contoh: nilai karakteristik</small>
+                <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}>
+                  <option value="">Pilih field Nilai</option>
+                  {sourceColumns.map(column => (
+                    <option key={column} value={column}>
+                      {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}>
+                  <option value="first">Nilai pertama</option>
+                  <option value="sum">SUM · Jumlah</option>
+                  <option value="mean">AVERAGE · Rata-rata</option>
+                  <option value="count">COUNT · Hitung</option>
+                  <option value="min">MIN · Terkecil</option>
+                  <option value="max">MAX · Terbesar</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+            <div>
+              {activePivot && (
+                <button
+                  className="button subtle"
+                  onClick={async () => {
+                    const result = await applyPresentation(baseData, calculatedColumns, null)
+                    setActivePivot(null)
+                    setData(result)
+                    setVisibleColumns(result.columns)
+                    setPivotOpen(false)
+                    setNotice('Tampilan pivot dilepas.')
+                  }}
+                >
+                  Lihat data asal
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="button subtle" onClick={() => setPivotOpen(false)}>Tutup</button>
+              {activePivot && (
+                <button
+                  className="button subtle"
+                  onClick={saveReport}
+                  disabled={!activePivot || !reportName.trim()}
+                  title="Simpan pivot bersama laporan"
+                >
+                  <Save size={14} /> Simpan ke laporan
+                </button>
+              )}
+              <button
+                className="button primary"
+                onClick={runPivot}
+                disabled={!pivotRows.every(Boolean) || !pivotColumn || !pivotValue}
+              >
+                Terapkan Pivot
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {columnChooserOpen && data.columns.length > 0 && (
+      <div className="modal-backdrop" onClick={() => setColumnChooserOpen(false)}>
+        <div className="modal-card column-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Columns3 size={18} /></span>
+              <span>Pilih & Susun Kolom Tabel</span>
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setColumnChooserOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div className="column-modal-body">
+            <div className="column-chooser-head" style={{ marginBottom: 0 }}>
+              <input
+                placeholder="Cari kolom…"
+                value={columnChooserSearch}
+                onChange={e => setColumnChooserSearch(e.target.value)}
+                style={{ flex: 1, height: '34px', fontSize: '11px' }}
+              />
+              <div className="column-chooser-actions">
+                <button
+                  className="text-button"
+                  onClick={() => setVisibleColumns(current => [...current.filter(c => data.columns.includes(c)), ...data.columns.filter(c => !current.includes(c))])}
+                >
+                  Tampilkan semua
+                </button>
+                <button
+                  className="text-button"
+                  onClick={() => setVisibleColumns(current => current.filter(c => data.columns.includes(c)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })))}
+                >
+                  Urut A–Z
+                </button>
+                <button
+                  className="text-button"
+                  onClick={() => setVisibleColumns(current => data.columns.filter(c => current.includes(c)))}
+                >
+                  Urutan awal
+                </button>
+              </div>
+            </div>
+            <p className="column-chooser-hint" style={{ margin: 0, fontSize: '11px', color: '#687b92' }}>
+              Centang kolom yang ingin ditampilkan. Tarik ikon <GripVertical size={12} style={{ display: 'inline', verticalAlign: 'middle' }} /> untuk mengatur urutan kolom kiri-kanan.
+            </p>
+            <div className="column-chooser-list" style={{ maxHeight: '350px' }}>
+              {[...visibleColumns.filter(column => data.columns.includes(column)), ...data.columns.filter(column => !visibleColumns.includes(column))]
+                .filter(column => column.toLowerCase().includes(columnChooserSearch.toLowerCase()) || (resultDescriptions[column] || '').toLowerCase().includes(columnChooserSearch.toLowerCase()))
+                .map(column => (
+                  <div
+                    className={`column-chooser-item${draggedColumn === column ? ' is-dragging' : ''}${dropColumn === column ? ' is-drop-target' : ''}`}
+                    key={column}
+                    title={[column, resultDescriptions[column]].filter(Boolean).join(' · ')}
+                    onDragOver={event => {
+                      if (draggedColumn && draggedColumn !== column && visibleColumns.includes(column)) {
+                        event.preventDefault()
+                        setDropColumn(column)
+                      }
+                    }}
+                    onDragLeave={() => setDropColumn(current => current === column ? null : current)}
+                    onDrop={event => {
+                      event.preventDefault()
+                      if (draggedColumn) moveVisibleColumn(draggedColumn, column)
+                      setDraggedColumn(null)
+                      setDropColumn(null)
+                    }}
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={visibleColumns.includes(column)}
+                        onChange={e => setVisibleColumns(current => e.target.checked ? [...current, column] : current.length > 1 ? current.filter(item => item !== column) : current)}
+                      />
+                      <strong>{column}</strong>
+                      {resultDescriptions[column] && <small>{resultDescriptions[column]}</small>}
+                    </label>
+                    {visibleColumns.includes(column) && (
+                      <span
+                        className="column-drag-handle"
+                        draggable
+                        title={`Tarik untuk memindahkan ${column}`}
+                        aria-label={`Tarik untuk memindahkan ${column}`}
+                        onDragStart={event => {
+                          event.dataTransfer.effectAllowed = 'move'
+                          event.dataTransfer.setData('text/plain', column)
+                          setDraggedColumn(column)
+                        }}
+                        onDragEnd={() => {
+                          setDraggedColumn(null)
+                          setDropColumn(null)
+                        }}
+                      >
+                        <GripVertical size={15} />
+                      </span>
+                    )}
+                  </div>
+                ))}
+            </div>
+          </div>
+          <div className="modal-actions">
+            <span style={{ fontSize: '11px', color: '#687b92', alignSelf: 'center', marginRight: 'auto' }}>
+              {visibleColumns.length} dari {data.columns.length} kolom tampil
+            </span>
+            <button className="button primary" onClick={() => setColumnChooserOpen(false)}>Selesai</button>
+          </div>
         </div>
       </div>
     )}
