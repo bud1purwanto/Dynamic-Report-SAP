@@ -44,6 +44,7 @@ fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.session_secret.
 signer = URLSafeTimedSerializer(settings.session_secret, salt="lumina-session")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESOURCE_ACCESS_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+STRUCTURE_CACHE: dict[tuple[str, str], tuple[float, tuple[list[dict[str, Any]], str]]] = {}
 
 
 async def gateway_allows_resource(token: str, resource_key: str) -> bool | None:
@@ -520,8 +521,15 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
 async def get_structure(token: str, target: dict[str, Any], table_name: str) -> tuple[list[dict[str, Any]], str]:
     if not IDENT.fullmatch(table_name):
         raise HTTPException(422, "Nama tabel tidak valid.")
+    table_upper = table_name.upper()
+    cache_key = (str(target.get("resource_key") or target.get("id")), table_upper)
+    cached = STRUCTURE_CACHE.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        # Return deep copy of fields list to avoid mutations
+        return [dict(f) for f in cached[1][0]], cached[1][1]
+
     result = await rpc_call(token, str(target["id"]), "mcp-sap__read_table_structure", {
-        "object_name": table_name.upper(),
+        "object_name": table_upper,
         "object_type": "TABLE",
         "resource_key": target["resource_key"],
     })
@@ -534,7 +542,7 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
         try:
             ddic_rows = await read_rows(ReadIn(
                 target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION", "ROLLNAME"],
-                filters=[FilterIn(field="TABNAME", value=table_name.upper()),
+                filters=[FilterIn(field="TABNAME", value=table_upper),
                          FilterIn(field="AS4LOCAL", value="A")], rowcount=1000,
             ), token)
             by_name = {str(row.get("FIELDNAME", "")).upper(): int(str(row["POSITION"]).strip())
@@ -547,7 +555,7 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
         try:
             texts = await read_rows(ReadIn(
                 target=str(target["id"]), table_name="DD03T", fields=["FIELDNAME", "DDTEXT", "DDLANGUAGE"],
-                filters=[FilterIn(field="TABNAME", value=table_name.upper())], rowcount=1000,
+                filters=[FilterIn(field="TABNAME", value=table_upper)], rowcount=1000,
             ), token)
             by_name: dict[str, str] = {}
             for row in sorted(texts, key=lambda item: str(item.get("DDLANGUAGE", "")) != "E"):
@@ -565,23 +573,31 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
         missing_rollnames = list(dict.fromkeys(
             rollnames.get(field["name"], "") for field in fields if not field.get("description")
             and IDENT.fullmatch(rollnames.get(field["name"], ""))))
-        async def read_element_text(rollname: str) -> tuple[str, str]:
-            try:
-                rows = await read_rows(ReadIn(
-                    target=str(target["id"]), table_name="DD04T", fields=["DDTEXT"],
-                    filters=[FilterIn(field="ROLLNAME", value=rollname),
-                             FilterIn(field="DDLANGUAGE", value="E")], rowcount=1,
-                ), token)
-                return rollname, str(rows[0].get("DDTEXT", "")).strip() if rows else ""
-            except (HTTPException, ValueError, KeyError):
-                return rollname, ""
-        texts_by_rollname: dict[str, str] = {}
-        for offset in range(0, len(missing_rollnames), 6):
-            texts_by_rollname.update(await asyncio.gather(
-                *(read_element_text(name) for name in missing_rollnames[offset:offset + 6])))
-        for field in fields:
-            field["description"] = field.get("description") or texts_by_rollname.get(rollnames.get(field["name"], ""), "")
+        if missing_rollnames:
+            texts_by_rollname: dict[str, str] = {}
+            # Query DD04T in batches of up to 25 items using IN clause instead of 1-by-1
+            for offset in range(0, len(missing_rollnames), 25):
+                batch = missing_rollnames[offset:offset + 25]
+                try:
+                    filters_dd04t = [
+                        FilterIn(field="ROLLNAME", operator="EQ", value=r) for r in batch
+                    ] + [FilterIn(field="DDLANGUAGE", operator="EQ", value="E")]
+                    rows = await read_rows(ReadIn(
+                        target=str(target["id"]), table_name="DD04T", fields=["ROLLNAME", "DDTEXT"],
+                        filters=filters_dd04t, rowcount=len(batch) * 2,
+                    ), token)
+                    for r in rows:
+                        rname = str(r.get("ROLLNAME", "")).upper()
+                        rtext = str(r.get("DDTEXT", "")).strip()
+                        if rname and rtext and rname not in texts_by_rollname:
+                            texts_by_rollname[rname] = rtext
+                except (HTTPException, ValueError, KeyError):
+                    pass
+            for field in fields:
+                field["description"] = field.get("description") or texts_by_rollname.get(rollnames.get(field["name"], ""), "")
     fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))
+    # Cache for 1 hour (3600 seconds)
+    STRUCTURE_CACHE[cache_key] = (time.monotonic() + 3600, ([dict(f) for f in fields], raw))
     return fields, raw
 
 
