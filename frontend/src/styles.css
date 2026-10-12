@@ -164,3 +164,9 @@ label small{font-size:11px;color:#9ba8b7;font-weight:500}
 .button.subtle .spinner{border-color:#b9cfeb;border-top-color:#2a59a7}
 .modal-loading-banner{display:flex;align-items:center;gap:12px;padding:12px 16px;background:#f0f6ff;border:1px solid #cbe0f8;border-radius:9px;color:#1d4e96;font-size:12px;font-weight:600;line-height:1.4}
 .modal-loading-banner .spinner{width:18px;height:18px;flex:none}
+.builder-grid.sources-collapsed{grid-template-columns:minmax(0,1fr)}
+.canvas-card.is-fullscreen{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;z-index:9995!important;border-radius:0!important;margin:0!important;box-shadow:none!important}
+.canvas-card.is-fullscreen .flow-wrap{min-height:calc(100vh - 120px)!important;height:100%!important}
+.modal-card.sources-modal{width:min(580px,100%);max-height:85vh;display:flex;flex-direction:column}
+.sources-modal-body{padding:16px 20px;overflow-y:auto;max-height:calc(85vh - 130px);display:grid;gap:14px}
+.canvas-head-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}

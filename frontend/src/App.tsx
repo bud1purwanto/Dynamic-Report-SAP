@@ -5,14 +5,14 @@ import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodes
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
   AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
-  Edit2, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
-  Settings2, ShieldCheck, SlidersHorizontal, Table2, Trash2, X,
+  Edit2, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen,
+  Play, Plus, Save, Scan, Search, Settings2, ShieldCheck, SlidersHorizontal, Table2, Trash2, X,
 } from 'lucide-react'
 import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
 
 type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
-type PivotConfig = { rows: string[]; column: string; value: string; aggregation: string }
+type PivotConfig = { rows: string[]; column: string; value: string; fallback_value?: string; aggregation: string }
 type CalculatedColumn = { name: string; operation: string; fields: string[] }
 type ReportDefinition = Query & { presentation?: { pivot?: PivotConfig | null; calculatedColumns?: CalculatedColumn[]; visibleColumns?: string[] } }
 type Report = { id: string; name: string; definition: ReportDefinition }
@@ -295,10 +295,14 @@ function App() {
   const [resultPageSize, setResultPageSize] = useState(25)
   const [resultSortCol, setResultSortCol] = useState<string | null>(null)
   const [resultSortDir, setResultSortDir] = useState<'asc' | 'desc'>('asc')
+  const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
+  const [isCanvasFullscreen, setIsCanvasFullscreen] = useState(false)
+  const [sourcesModalOpen, setSourcesModalOpen] = useState(false)
   const [pivotOpen, setPivotOpen] = useState(false)
   const [pivotRows, setPivotRows] = useState<string[]>([''])
   const [pivotColumn, setPivotColumn] = useState('')
   const [pivotValue, setPivotValue] = useState('')
+  const [pivotFallbackValue, setPivotFallbackValue] = useState('')
   const [pivotAgg, setPivotAgg] = useState('first')
   const [formulaOpen, setFormulaOpen] = useState(false)
   const [formulaName, setFormulaName] = useState('')
@@ -572,6 +576,21 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [structureSignature, structureKeys])
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => flowRef.current?.fitView({ padding: 0.16, duration: 250 }), 150)
+    return () => window.clearTimeout(timer)
+  }, [isCanvasFullscreen, sourcesCollapsed])
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && isCanvasFullscreen && !sourcesModalOpen && !relationModal && !catalogModal.open) {
+        setIsCanvasFullscreen(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isCanvasFullscreen, sourcesModalOpen, relationModal, catalogModal.open])
+
   function resetWorkspace() {
     setRelationModal(null)
     setActiveReport('')
@@ -590,6 +609,7 @@ function App() {
     setPivotRows([''])
     setPivotColumn('')
     setPivotValue('')
+    setPivotFallbackValue('')
     setPivotAgg('first')
     setVisibleColumns([])
     setVariants([])
@@ -857,9 +877,11 @@ function App() {
       if (pivot && pivot.rows.length) {
         setActivePivot(pivot)
         setPivotRows(pivot.rows)
+        setPivotFallbackValue(pivot.fallback_value || '')
       } else if (activePivot && !pivot) {
         setActivePivot(null)
         setPivotRows([''])
+        setPivotFallbackValue('')
       }
       setData(displayed)
       setVisibleColumns(current => {
@@ -901,8 +923,14 @@ function App() {
       const available = new Set(result.columns)
       const rows = pivot.rows.filter(column => available.has(column))
       if (rows.length && available.has(pivot.column) && available.has(pivot.value)) {
-        result = await post<GridData>('/data/pivot', { rows: result.rows, index: rows,
-          columns: pivot.column, values: pivot.value, aggregation: pivot.aggregation })
+        result = await post<GridData>('/data/pivot', {
+          rows: result.rows,
+          index: rows,
+          columns: pivot.column,
+          values: pivot.value,
+          fallback_values: (pivot.fallback_value && available.has(pivot.fallback_value)) ? pivot.fallback_value : undefined,
+          aggregation: pivot.aggregation,
+        })
       }
     }
 
@@ -922,14 +950,21 @@ function App() {
     if (!rows.length || !pivotColumn || !pivotValue || new Set([...rows, pivotColumn, pivotValue]).size !== rows.length + 2) {
       setError('Pilih field Baris, Kolom, dan Nilai yang berbeda.'); return
     }
-    const unavailable = [...rows, pivotColumn, pivotValue].filter(column => !sourceColumns.includes(column))
+    const checkColumns = [...rows, pivotColumn, pivotValue, ...(pivotFallbackValue ? [pivotFallbackValue] : [])]
+    const unavailable = checkColumns.filter(column => !sourceColumns.includes(column))
     if (unavailable.length) {
       setError(`Kolom pivot sudah tidak tersedia: ${unavailable.join(', ')}. Pilih ulang pengaturan pivot.`)
       return
     }
     setBusy(true); setError('')
     try {
-      const config = { rows, column: pivotColumn, value: pivotValue, aggregation: pivotAgg }
+      const config: PivotConfig = {
+        rows,
+        column: pivotColumn,
+        value: pivotValue,
+        fallback_value: pivotFallbackValue || undefined,
+        aggregation: pivotAgg,
+      }
       const result = await applyPresentation(baseData, calculatedColumns, config)
       setActivePivot(config)
       setData(result); setVisibleColumns(result.columns); setPivotOpen(false)
@@ -1086,6 +1121,7 @@ function App() {
     setPivotRows(presentation?.pivot?.rows?.length ? presentation.pivot.rows : [''])
     setPivotColumn(presentation?.pivot?.column || '')
     setPivotValue(presentation?.pivot?.value || '')
+    setPivotFallbackValue(presentation?.pivot?.fallback_value || '')
     setPivotAgg(presentation?.pivot?.aggregation || 'first')
     if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
     setActiveReport(report.id); setTab('builder')
@@ -1406,6 +1442,148 @@ function App() {
   const editingLeftFields = editingLeftSource ? metadataFor(editingLeftSource) : []
   const editingRightFields = editingRightSource ? metadataFor(editingRightSource) : []
 
+  function renderSourceForms() {
+    return query.sources.map((source, index) => (
+      <div className="source-form" key={index}>
+        <div className="source-title">
+          <span className="source-badge">{index + 1}</span>
+          <strong>Tabel {source.alias}</strong>
+          {index > 0 && (
+            <button className="icon-button" title="Hapus tabel" onClick={() => removeSource(index)}>
+              <Trash2 size={15} />
+            </button>
+          )}
+        </div>
+        <label>
+          Nama tabel
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <input
+              placeholder="Contoh: MARA"
+              value={source.table_name}
+              onChange={e => updateSource(index, { table_name: e.target.value.toUpperCase() })}
+            />
+            <button
+              className="button subtle"
+              style={{ padding: '0.45rem 0.6rem', height: '36px', whiteSpace: 'nowrap' }}
+              onClick={() => openTableCatalog(index)}
+              title="Cari di katalog tabel SAP"
+            >
+              <BookOpen size={14} /> Katalog
+            </button>
+          </div>
+        </label>
+        <small className="metadata-status">
+          {structureLoading[source.alias]
+            ? 'Memuat struktur tabel…'
+            : metadataFor(source).length
+              ? `${metadataFor(source).length} kolom tersedia di canvas`
+              : 'Isi nama tabel; kolom akan dimuat otomatis.'}
+        </small>
+        {metadataFor(source).length > 0 && !metadataFor(source).some(field => field.description) && (
+          <small className="metadata-status">Teks deskripsi kolom tidak tersedia dari SAP untuk tabel ini.</small>
+        )}
+        <button
+          className="text-button structure-button"
+          onClick={() => inspectTable(source)}
+          disabled={!source.table_name || !query.target || busy}
+        >
+          <Search size={14} /> Muat ulang struktur
+        </button>
+        {structureText[source.alias] && !metadataFor(source).length && (
+          <div className="metadata-status">Struktur belum dapat dibaca. Coba muat ulang atau periksa akses SAP.</div>
+        )}
+        {index > 0 && (
+          <div className="join-form">
+            <span className="join-label">RELASI / JOIN</span>
+            <div className="join-row">
+              <select
+                value={query.joins[index - 1]?.left_alias || query.sources[0].alias}
+                onChange={e => updateJoin(index - 1, { left_alias: e.target.value })}
+              >
+                {query.sources.slice(0, index).map(s => (
+                  <option key={s.alias}>{s.alias}</option>
+                ))}
+              </select>
+              <select
+                value={query.joins[index - 1]?.how || 'left'}
+                onChange={e => updateJoin(index - 1, { how: e.target.value })}
+              >
+                <option value="left">LEFT JOIN</option>
+                <option value="inner">INNER JOIN</option>
+              </select>
+            </div>
+            {(query.joins[index - 1]?.conditions?.length
+              ? query.joins[index - 1].conditions!
+              : query.joins[index - 1]?.left_field && query.joins[index - 1]?.right_field
+                ? [{ left_field: query.joins[index - 1].left_field, right_field: query.joins[index - 1].right_field }]
+                : []
+            ).map((condition, conditionIndex, conditions) => (
+              <div className="join-condition" key={conditionIndex}>
+                <select
+                  value={condition.left_field}
+                  onChange={e =>
+                    setJoinConditions(
+                      index - 1,
+                      conditions.map((item, i) => (i === conditionIndex ? { ...item, left_field: e.target.value } : item)),
+                    )
+                  }
+                >
+                  <option value="">Field kiri</option>
+                  {metadataFor(query.sources.find(item => item.alias === query.joins[index - 1].left_alias) || query.sources[0]).map(field => (
+                    <option key={field.name} value={field.name}>
+                      {field.name}
+                      {field.description ? ` · ${field.description}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <span>=</span>
+                <select
+                  value={condition.right_field}
+                  onChange={e =>
+                    setJoinConditions(
+                      index - 1,
+                      conditions.map((item, i) => (i === conditionIndex ? { ...item, right_field: e.target.value } : item)),
+                    )
+                  }
+                >
+                  <option value="">Field kanan</option>
+                  {metadataFor(source).map(field => (
+                    <option key={field.name} value={field.name}>
+                      {field.name}
+                      {field.description ? ` · ${field.description}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="icon-button"
+                  title="Hapus kondisi join"
+                  onClick={() => setJoinConditions(index - 1, conditions.filter((_, i) => i !== conditionIndex))}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+            <button
+              className="text-button"
+              onClick={() => {
+                const join = query.joins[index - 1]
+                const existing = join.conditions?.length
+                  ? join.conditions
+                  : join.left_field && join.right_field
+                    ? [{ left_field: join.left_field, right_field: join.right_field }]
+                    : []
+                setJoinConditions(index - 1, [...existing, { left_field: '', right_field: '' }])
+              }}
+              disabled={(query.joins[index - 1]?.conditions?.length || 0) >= 10}
+            >
+              <Plus size={13} /> Tambah kondisi
+            </button>
+          </div>
+        )}
+      </div>
+    ))
+  }
+
   if (loading) return <div className="loading-screen"><div className="spinner" />Memuat Lumina…</div>
   if (!user) return <div className="login-shell">
     <div className="login-aside"><div className="brand-mark"><Layers3 size={30} /></div>
@@ -1556,72 +1734,117 @@ function App() {
                 )}
               </div>
             </div></div>
-          <div className="builder-grid"><section className="card source-card"><div className="section-head"><div><span className="icon-tile blue"><Database size={18} /></span><strong>Sumber Data</strong></div>
-            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-              <button className="text-button" onClick={() => openTableCatalog()} title="Buka katalog tabel SAP"><BookOpen size={15} /> Katalog Tabel</button>
-              <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}><Plus size={16} /> Tambah Tabel</button>
-            </div></div>
-            {query.sources.map((source, index) => <div className="source-form" key={index}>
-              <div className="source-title"><span className="source-badge">{index + 1}</span><strong>Tabel {source.alias}</strong>
-                {index > 0 && <button className="icon-button" title="Hapus tabel" onClick={() => removeSource(index)}><Trash2 size={15} /></button>}</div>
-              <label>Nama tabel
-                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-                  <input placeholder="Contoh: MARA" value={source.table_name}
-                    onChange={e => updateSource(index, { table_name: e.target.value.toUpperCase() })} />
-                  <button className="button subtle" style={{ padding: '0.45rem 0.6rem', height: '36px', whiteSpace: 'nowrap' }}
-                    onClick={() => openTableCatalog(index)} title="Cari di katalog tabel SAP">
-                    <BookOpen size={14} /> Katalog
+          <div className={`builder-grid ${sourcesCollapsed ? 'sources-collapsed' : ''}`}>
+            {!sourcesCollapsed && (
+              <section className="card source-card">
+                <div className="section-head">
+                  <div>
+                    <span className="icon-tile blue"><Database size={18} /></span>
+                    <strong>Sumber Data</strong>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                    <button className="text-button" onClick={() => openTableCatalog()} title="Buka katalog tabel SAP">
+                      <BookOpen size={14} /> Katalog
+                    </button>
+                    <button className="text-button" onClick={addSource} disabled={query.sources.length >= 3}>
+                      <Plus size={15} /> Tambah
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() => setSourcesCollapsed(true)}
+                      title="Sembunyikan panel Sumber Data (Collapse)"
+                    >
+                      <PanelLeftClose size={16} />
+                    </button>
+                  </div>
+                </div>
+                {renderSourceForms()}
+              </section>
+            )}
+            <section className={`card canvas-card ${isCanvasFullscreen ? 'is-fullscreen' : ''}`}>
+              <div className="section-head">
+                <div>
+                  <span className="icon-tile purple"><Settings2 size={18} /></span>
+                  <strong>Visual Canvas</strong>
+                  {isCanvasFullscreen && (
+                    <span className="tiny-pill" style={{ marginLeft: 6, color: '#2b5ca5', background: '#eaf2ff' }}>
+                      Layar Penuh
+                    </span>
+                  )}
+                </div>
+                <div className="canvas-head-actions">
+                  {!isCanvasFullscreen && (
+                    <span className="tiny-pill">Geser latar · Tarik header tabel · Hubungkan field</span>
+                  )}
+                  {(sourcesCollapsed || isCanvasFullscreen) && (
+                    <button
+                      className="button subtle"
+                      style={{ height: '32px', fontSize: '11px', padding: '0 10px', gap: '6px' }}
+                      onClick={() => setSourcesModalOpen(true)}
+                      title="Buka Popup Pengaturan Sumber Data"
+                    >
+                      <Database size={14} /> Sumber Data ({query.sources.length})
+                    </button>
+                  )}
+                  {sourcesCollapsed && !isCanvasFullscreen && (
+                    <button
+                      className="button subtle"
+                      style={{ height: '32px', fontSize: '11px', padding: '0 10px', gap: '6px' }}
+                      onClick={() => setSourcesCollapsed(false)}
+                      title="Tampilkan panel Sumber Data di samping"
+                    >
+                      <PanelLeftOpen size={15} /> Buka Panel
+                    </button>
+                  )}
+                  <button
+                    className="button subtle"
+                    style={{ height: '32px', fontSize: '11px', padding: '0 9px', gap: '5px' }}
+                    onClick={() => flowRef.current?.fitView({ padding: 0.16, duration: 250 })}
+                    title="Sesuaikan zoom & posisi canvas"
+                  >
+                    <Scan size={14} /> Reset Posisi
+                  </button>
+                  <button
+                    className="button subtle"
+                    style={{ height: '32px', fontSize: '11px', padding: '0 10px', gap: '6px' }}
+                    onClick={() => setIsCanvasFullscreen(!isCanvasFullscreen)}
+                    title={isCanvasFullscreen ? 'Keluar dari layar penuh (Esc)' : 'Tampilkan canvas layar penuh'}
+                  >
+                    {isCanvasFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                    <span>{isCanvasFullscreen ? 'Keluar Fullscreen' : 'Layar Penuh'}</span>
                   </button>
                 </div>
-              </label>
-              <small className="metadata-status">{structureLoading[source.alias] ? 'Memuat struktur tabel…' :
-                metadataFor(source).length ? `${metadataFor(source).length} kolom tersedia di canvas` :
-                  'Isi nama tabel; kolom akan dimuat otomatis.'}</small>
-              {metadataFor(source).length > 0 && !metadataFor(source).some(field => field.description) &&
-                <small className="metadata-status">Teks deskripsi kolom tidak tersedia dari SAP untuk tabel ini.</small>}
-              <button className="text-button structure-button" onClick={() => inspectTable(source)}
-                disabled={!source.table_name || !query.target || busy}><Search size={14} /> Muat ulang struktur</button>
-              {structureText[source.alias] && !metadataFor(source).length &&
-                <div className="metadata-status">Struktur belum dapat dibaca. Coba muat ulang atau periksa akses SAP.</div>}
-              {index > 0 && <div className="join-form"><span className="join-label">RELASI / JOIN</span>
-                <div className="join-row"><select value={query.joins[index - 1]?.left_alias || query.sources[0].alias}
-                  onChange={e => updateJoin(index - 1, { left_alias: e.target.value })}>
-                  {query.sources.slice(0, index).map(s => <option key={s.alias}>{s.alias}</option>)}</select>
-                  <select value={query.joins[index - 1]?.how || 'left'}
-                    onChange={e => updateJoin(index - 1, { how: e.target.value })}><option value="left">LEFT JOIN</option><option value="inner">INNER JOIN</option></select></div>
-                {(query.joins[index - 1]?.conditions?.length ? query.joins[index - 1].conditions! :
-                  query.joins[index - 1]?.left_field && query.joins[index - 1]?.right_field
-                    ? [{ left_field: query.joins[index - 1].left_field, right_field: query.joins[index - 1].right_field }] : [])
-                  .map((condition, conditionIndex, conditions) => <div className="join-condition" key={conditionIndex}>
-                    <select value={condition.left_field} onChange={e => setJoinConditions(index - 1,
-                      conditions.map((item, i) => i === conditionIndex ? { ...item, left_field: e.target.value } : item))}>
-                      <option value="">Field kiri</option>{metadataFor(query.sources.find(item => item.alias === query.joins[index - 1].left_alias) || query.sources[0]).map(field =>
-                        <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select>
-                    <span>=</span><select value={condition.right_field} onChange={e => setJoinConditions(index - 1,
-                      conditions.map((item, i) => i === conditionIndex ? { ...item, right_field: e.target.value } : item))}>
-                      <option value="">Field kanan</option>{metadataFor(source).map(field =>
-                        <option key={field.name} value={field.name}>{field.name}{field.description ? ` · ${field.description}` : ''}</option>)}</select>
-                    <button className="icon-button" title="Hapus kondisi join" onClick={() => setJoinConditions(index - 1,
-                      conditions.filter((_, i) => i !== conditionIndex))}><Trash2 size={13} /></button></div>)}
-                <button className="text-button" onClick={() => {
-                  const join = query.joins[index - 1]
-                  const existing = join.conditions?.length ? join.conditions : join.left_field && join.right_field
-                    ? [{ left_field: join.left_field, right_field: join.right_field }] : []
-                  setJoinConditions(index - 1, [...existing, { left_field: '', right_field: '' }])
-                }} disabled={(query.joins[index - 1]?.conditions?.length || 0) >= 10}><Plus size={13} /> Tambah kondisi</button>
-              </div>}
-            </div>)}</section>
-            <section className="card canvas-card"><div className="section-head"><div><span className="icon-tile purple"><Settings2 size={18} /></span><strong>Visual Canvas</strong></div>
-              <span className="tiny-pill">Geser latar · Tarik header tabel · Hubungkan field</span></div>
-              <div className="flow-wrap"><ReactFlow<TableFlowNode> nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange} onConnect={connectFields} onEdgeClick={(_, edge) => {
-                  const match = /^join-(\d+)-(\d+)$/.exec(edge.id)
-                  if (match) setRelationModal({ joinIndex: Number(match[1]), conditionIndex: Number(match[2]) })
-                }} onInit={instance => { flowRef.current = instance }}
-                fitView panOnDrag nodesDraggable nodesConnectable elementsSelectable deleteKeyCode={null}
-                minZoom={0.2} maxZoom={1.8}>
-                  <Background color="#dae3ef" gap={20} /><Controls showInteractive={false} /></ReactFlow></div>
-              <div className="canvas-foot"><span className="connection-dot" /> Semua operasi SAP melalui MCP Gateway</div></section></div>
+              </div>
+              <div className="flow-wrap">
+                <ReactFlow<TableFlowNode>
+                  nodes={flowNodes}
+                  edges={flowEdges}
+                  nodeTypes={nodeTypes}
+                  onNodesChange={onNodesChange}
+                  onConnect={connectFields}
+                  onEdgeClick={(_, edge) => {
+                    const match = /^join-(\d+)-(\d+)$/.exec(edge.id)
+                    if (match) setRelationModal({ joinIndex: Number(match[1]), conditionIndex: Number(match[2]) })
+                  }}
+                  onInit={instance => { flowRef.current = instance }}
+                  fitView
+                  panOnDrag
+                  nodesDraggable
+                  nodesConnectable
+                  elementsSelectable
+                  deleteKeyCode={null}
+                  minZoom={0.2}
+                  maxZoom={1.8}
+                >
+                  <Background color="#dae3ef" gap={20} />
+                  <Controls showInteractive={false} />
+                </ReactFlow>
+              </div>
+              <div className="canvas-foot">
+                <span className="connection-dot" /> Semua operasi SAP melalui MCP Gateway
+              </div>
+            </section>
+          </div>
           <section className="card field-selection-card"><div className="section-head"><div><span className="icon-tile blue"><Columns3 size={18} /></span><strong>Kolom Laporan & Parameter Filter</strong></div>
             <span className="tiny-pill">Pilih setelah tabel dan join siap</span></div>
             <p className="field-selection-intro">Kolom <strong>Tampil</strong> masuk hasil laporan. Kolom <strong>Filter</strong> menjadi parameter saat menjalankan query.</p>
@@ -2370,6 +2593,51 @@ function App() {
               : <div className="empty-small">Belum ada riwayat.</div>}</section></>}
       </div>
     </main>
+    {sourcesModalOpen && (
+      <div className="modal-backdrop" onClick={() => setSourcesModalOpen(false)}>
+        <div className="modal-card sources-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Database size={18} /></span>
+              <span>Pengaturan Sumber Data & Relasi ({query.sources.length} Tabel)</span>
+            </div>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <button
+                className="button subtle"
+                style={{ height: '30px', fontSize: '11px', padding: '0 9px', gap: '4px' }}
+                onClick={() => openTableCatalog()}
+                title="Cari katalog tabel SAP"
+              >
+                <BookOpen size={13} /> Katalog
+              </button>
+              <button
+                className="button primary"
+                style={{ height: '30px', fontSize: '11px', padding: '0 9px', gap: '4px' }}
+                onClick={addSource}
+                disabled={query.sources.length >= 3}
+              >
+                <Plus size={13} /> Tambah Tabel
+              </button>
+              <button
+                className="icon-button"
+                title="Tutup"
+                onClick={() => setSourcesModalOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+          <div className="sources-modal-body">
+            {renderSourceForms()}
+          </div>
+          <div className="modal-actions">
+            <button className="button primary" onClick={() => setSourcesModalOpen(false)}>
+              Selesai
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     {catalogModal.open && (
       <div className="modal-backdrop" onClick={() => setCatalogModal(c => ({ ...c, open: false }))}>
         <div className="modal-card catalog-modal" onClick={e => e.stopPropagation()}>
@@ -2761,9 +3029,9 @@ function App() {
 
               <div className="pivot-area">
                 <strong>Nilai</strong>
-                <small>Contoh: nilai karakteristik</small>
+                <small>Contoh: nilai karakteristik (ATWRT)</small>
                 <select value={pivotValue} onChange={e => setPivotValue(e.target.value)}>
-                  <option value="">Pilih field Nilai</option>
+                  <option value="">Pilih field Nilai (Utama)</option>
                   {sourceColumns.map(column => (
                     <option key={column} value={column}>
                       {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
@@ -2778,6 +3046,22 @@ function App() {
                   <option value="min">MIN · Terkecil</option>
                   <option value="max">MAX · Terbesar</option>
                 </select>
+                <div style={{ marginTop: '6px', paddingTop: '8px', borderTop: '1px dashed #dbe5f2', display: 'grid', gap: '5px' }}>
+                  <label style={{ fontSize: '10px', color: '#415774', fontWeight: 700 }}>
+                    Nilai Cadangan (Fallback jika kosong):
+                  </label>
+                  <select value={pivotFallbackValue} onChange={e => setPivotFallbackValue(e.target.value)}>
+                    <option value="">(Opsional) Tanpa nilai cadangan</option>
+                    {sourceColumns.filter(column => column !== pivotValue).map(column => (
+                      <option key={column} value={column}>
+                        {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <small style={{ fontSize: '9.5px', color: '#7c8fa6', lineHeight: 1.35 }}>
+                    Contoh: Jika Nilai Utama <code>ATWRT</code>, pilih <code>ATFLV</code> agar panjang/lebar/angka otomatis terisi.
+                  </small>
+                </div>
               </div>
             </div>
           </div>

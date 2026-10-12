@@ -146,6 +146,7 @@ class PivotIn(BaseModel):
     index: list[str] | str
     columns: str
     values: str
+    fallback_values: str | None = None
     aggregation: str = "first"
 
 
@@ -1195,6 +1196,21 @@ async def pivot(dto: PivotIn, auth: tuple[AppSession, str] = Depends(get_token))
     return pivot_data(dto)
 
 
+def format_sap_value(val: Any) -> Any:
+    if val is None or pd.isna(val):
+        return None
+    val_str = str(val).strip()
+    if not val_str:
+        return None
+    try:
+        f = float(val_str)
+        if f.is_integer():
+            return int(f)
+        return round(f, 6)
+    except (ValueError, TypeError):
+        return val_str
+
+
 def pivot_data(dto: PivotIn) -> dict[str, Any]:
     if dto.aggregation not in ("first", "sum", "mean", "count", "min", "max"):
         raise HTTPException(422, "Agregasi tidak didukung.")
@@ -1210,6 +1226,20 @@ def pivot_data(dto: PivotIn) -> dict[str, Any]:
         return {"columns": list(frame.columns), "rows": dto.rows}
     if dto.columns in index_fields or dto.values in index_fields or dto.values == dto.columns:
         raise HTTPException(422, "Kolom Baris, Kolom, dan Nilai harus berbeda.")
+
+    # Apply fallback value if specified (e.g. ATWRT is primary, ATFLV is fallback for numbers)
+    if dto.fallback_values and dto.fallback_values in frame.columns and dto.fallback_values != dto.values:
+        def coalesce_val(row):
+            primary = row.get(dto.values)
+            if primary is not None and not (isinstance(primary, float) and math.isnan(primary)):
+                primary_str = str(primary).strip()
+                if primary_str:
+                    return primary_str
+            fallback = row.get(dto.fallback_values)
+            return format_sap_value(fallback)
+
+        frame[dto.values] = frame.apply(coalesce_val, axis=1)
+
     try:
         if dto.aggregation in ("sum", "mean"):
             frame[dto.values] = pd.to_numeric(frame[dto.values], errors="coerce")
@@ -1298,8 +1328,14 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
             remaining_calcs.append(calculation)
             
     if pivot_config:
-        rows = pivot_data(PivotIn(rows=rows, index=pivot_config["rows"], columns=pivot_config["column"],
-                                  values=pivot_config["value"], aggregation=pivot_config["aggregation"]))["rows"]
+        rows = pivot_data(PivotIn(
+            rows=rows,
+            index=pivot_config["rows"],
+            columns=pivot_config["column"],
+            values=pivot_config["value"],
+            fallback_values=pivot_config.get("fallback_value") or pivot_config.get("fallback_values"),
+            aggregation=pivot_config["aggregation"],
+        ))["rows"]
                                   
     # Run any remaining calculations that target post-pivot columns
     for calculation in remaining_calcs:
