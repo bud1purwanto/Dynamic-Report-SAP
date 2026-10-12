@@ -451,8 +451,9 @@ function App() {
       api<Credential[]>('/sap/credentials'),
       api<CompareVariant[]>('/compare-variants'),
     ])
+    const serverList = catalog.status === 'fulfilled' ? catalog.value.resources : servers
     if (catalog.status === 'fulfilled') {
-      const allowed = catalog.value.resources
+      const allowed = serverList
       const hasTarget = (id: string) => allowed.some(server => server.id === id)
       setServers(allowed)
       setQuery(q => ({ ...q, target: hasTarget(q.target) ? q.target : allowed[0]?.id || '' }))
@@ -461,8 +462,15 @@ function App() {
       setOtherTarget(t => hasTarget(t) ? t : allowed.find(server => server.id !== (hasTarget(compareTarget) ? compareTarget : allowed[0]?.id))?.id || '')
     }
     if (saved.status === 'fulfilled') {
-      setReports(saved.value)
-      setActiveReport(cur => saved.value.some(r => r.id === cur) ? cur : '')
+      const reportList = saved.value
+      setReports(reportList)
+      const lastReportId = localStorage.getItem('lumina_active_report_id')
+      const targetReport = reportList.find(r => r.id === lastReportId)
+      if (targetReport && !activeReport) {
+        await selectReport(targetReport, serverList)
+      } else if (!activeReport) {
+        setActiveReport(cur => reportList.some(r => r.id === cur) ? cur : '')
+      }
     }
     if (creds.status === 'fulfilled') setCredentials(creds.value)
     if (compVariants.status === 'fulfilled') setCompareVariants(compVariants.value)
@@ -556,6 +564,7 @@ function App() {
   function resetWorkspace() {
     setRelationModal(null)
     setActiveReport('')
+    localStorage.removeItem('lumina_active_report_id')
     setReportName('')
     setQuery({
       target: servers[0]?.id || '',
@@ -927,10 +936,12 @@ function App() {
           method: 'PUT', body: JSON.stringify({ name, definition }),
         })
         setActiveReport(saved.id)
+        localStorage.setItem('lumina_active_report_id', saved.id)
         setNotice(`Laporan "${name}" berhasil diperbarui.`)
       } else {
         const saved = await post<{ id: string }>('/reports', { name, definition })
         setActiveReport(saved.id)
+        localStorage.setItem('lumina_active_report_id', saved.id)
         setNotice(`Laporan "${name}" berhasil disimpan.`)
       }
       await loadWorkspace()
@@ -945,6 +956,7 @@ function App() {
     try {
       const saved = await post<{ id: string }>('/reports', { name, definition: { ...query, presentation: { pivot: activePivot, calculatedColumns, visibleColumns } } })
       setActiveReport(saved.id)
+      localStorage.setItem('lumina_active_report_id', saved.id)
       await loadWorkspace()
       setNotice(`Laporan baru "${name}" berhasil dibuat (Save As).`)
     } catch (e) { setError(message(e)) }
@@ -962,6 +974,7 @@ function App() {
         try {
           await api(`/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' })
           if (activeReport === reportId) {
+            localStorage.removeItem('lumina_active_report_id')
             resetWorkspace()
           }
           await loadWorkspace()
@@ -972,9 +985,10 @@ function App() {
     })
   }
 
-  async function selectReport(report: Report) {
+  async function selectReport(report: Report, serverList: Server[] = servers) {
     setRelationModal(null)
-    const targetAllowed = servers.some(server => server.id === report.definition.target)
+    const availableServers = serverList.length ? serverList : servers
+    const targetAllowed = availableServers.some(server => server.id === report.definition.target)
     setQuery({ ...report.definition, target: targetAllowed ? report.definition.target : '' })
     const presentation = report.definition.presentation
     setActivePivot(presentation?.pivot || null)
@@ -986,6 +1000,7 @@ function App() {
     if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
     setActiveReport(report.id); setTab('builder')
     setReportName(report.name)
+    localStorage.setItem('lumina_active_report_id', report.id)
     setFieldText({}); setStructureFields({}); setStructureKeys({}); setStructureText({})
     setData({ columns: [], rows: [] }); setBaseData({ columns: [], rows: [] }); setVisibleColumns(presentation?.visibleColumns || [])
     try { setVariants(await api<typeof variants>(`/reports/${report.id}/variants`)) }
@@ -1236,7 +1251,11 @@ function App() {
   }
 
   const resultDescriptions = useMemo(() => Object.fromEntries(query.sources.flatMap(source => (structureFields[source.alias] || []).map(field => [`${source.alias}.${field.name}`, field.description || '']))), [query.sources, structureFields])
-  const sourceColumns = useMemo(() => [...baseData.columns, ...calculatedColumns.map(column => column.name)], [baseData.columns, calculatedColumns])
+  const queryFieldColumns = useMemo(() => query.sources.flatMap(s => s.fields.map(f => `${s.alias}.${f.toUpperCase()}`)), [query.sources])
+  const sourceColumns = useMemo(() => {
+    const raw = baseData.columns.length ? baseData.columns : queryFieldColumns
+    return Array.from(new Set([...raw, ...calculatedColumns.map(column => column.name)]))
+  }, [baseData.columns, queryFieldColumns, calculatedColumns])
   const columns = useMemo<ColDef<Row>[]>(() => visibleColumns
     .filter(c => data.columns.includes(c))
     .map(c => ({
