@@ -5,8 +5,8 @@ import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodes
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
   AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
-  Edit2, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
-  Settings2, ShieldCheck, Table2, Trash2, X,
+  Edit2, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
+  Settings2, ShieldCheck, SlidersHorizontal, Table2, Trash2, X,
 } from 'lucide-react'
 import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
@@ -280,6 +280,7 @@ function App() {
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
   const [columnChooserOpen, setColumnChooserOpen] = useState(false)
   const [columnChooserSearch, setColumnChooserSearch] = useState('')
+  const [parameterModalOpen, setParameterModalOpen] = useState(false)
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null)
   const [dropColumn, setDropColumn] = useState<string | null>(null)
   const [selectionDialog, setSelectionDialog] = useState<SelectionDialog | null>(null)
@@ -794,6 +795,15 @@ function App() {
       setStructureKeys(current => ({ ...current, [source.alias]: `${query.target}:${source.table_name}` }))
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
+  }
+
+  function handleRunQueryClick() {
+    const hasFilters = query.sources.some(s => s.filters.length > 0)
+    if (hasFilters) {
+      setParameterModalOpen(true)
+    } else {
+      runQuery()
+    }
   }
 
   async function runQuery() {
@@ -1455,7 +1465,21 @@ function App() {
             <p>Susun sumber data SAP, hubungkan tabel, lalu lihat hasilnya.</p></div>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button className="button subtle" onClick={resetWorkspace} title="Bersihkan canvas & mulai query baru"><Plus size={16} /> Query Baru</button>
-              <button className="button primary" onClick={runQuery} disabled={busy || !query.target}><Play size={16} fill="currentColor" />{busy ? 'Memproses…' : 'Jalankan Query'}</button>
+              {query.sources.some(source => source.filters.length > 0) && (
+                <button
+                  className="button subtle"
+                  onClick={() => setParameterModalOpen(true)}
+                  title="Atur parameter filter query"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <SlidersHorizontal size={15} />
+                  Parameter Filter
+                  <span className="count-pill" style={{ marginLeft: '2px', background: '#e1ecf8', color: '#1d5cb4' }}>
+                    {query.sources.reduce((acc, s) => acc + new Set(s.filters.map(f => f.field)).size, 0)}
+                  </span>
+                </button>
+              )}
+              <button className="button primary" onClick={handleRunQueryClick} disabled={busy || !query.target}><Play size={16} fill="currentColor" />{busy ? 'Memproses…' : 'Jalankan Query'}</button>
             </div></div>
           <div className="toolbar"><div className="field-group"><label>SERVER SAP</label>
             <select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>
@@ -1668,18 +1692,42 @@ function App() {
                     updateSource(sourceIndex, { fields: e.target.value.toUpperCase().split(',').map(value => value.trim()).filter(Boolean) }) }} />}
               </div>
             })}</div>
-            {query.sources.some(source => source.filters.length) && <div className="parameter-panel"><strong>Nilai parameter</strong><small>Tambahkan beberapa nilai atau interval. Pilihan pada field yang sama digabung sebagai alternatif; field berbeda harus sama-sama terpenuhi.</small>
-              {query.sources.flatMap((source, sourceIndex) => [...new Set(source.filters.map(filter => filter.field))].map(field =>
-                <div className="parameter-group" key={`${source.alias}-${field}`}><div className="parameter-group-head"><strong>{source.table_name}.{field}</strong><small>{metadataFor(source).find(item => item.name === field)?.description}</small><button className="text-button" onClick={() => openSelectionDialog(sourceIndex, field)}><Columns3 size={14} /> Pilihan ganda</button></div>
-                  {source.filters.map((filter, filterIndex) => filter.field !== field || source.filters.slice(0, filterIndex).filter(item => item.field === field).length >= 2 ? null : <div className="parameter-condition" key={`${field}-${filterIndex}`}>
-                    <select aria-label="Pilihan atau pengecualian" value={filter.sign || 'I'} onChange={e => updateFilter(sourceIndex, filterIndex, { sign: e.target.value as 'I' | 'E' })}><option value="I">Pilih</option><option value="E">Kecualikan</option></select>
-                    <select aria-label="Operator" value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}><option value="EQ">Sama dengan</option><option value="BT">Interval</option><option value="NE">Tidak sama</option><option value="GT">Lebih dari</option><option value="GE">≥</option><option value="LT">Kurang dari</option><option value="LE">≤</option></select>
-                    <input aria-label="Nilai awal" placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'} value={filter.value} onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })} />
-                    {filter.operator === 'BT' && <><span className="parameter-range-separator">sampai</span><input aria-label="Nilai akhir" placeholder="Sampai" value={filter.high_value || ''} onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: e.target.value })} /></>}
-                    <button className="icon-button" title="Hapus pilihan" aria-label={`Hapus pilihan ${field}`} onClick={() => updateSource(sourceIndex, { filters: source.filters.filter((_, index) => index !== filterIndex) })}><Trash2 size={14} /></button>
-                  </div>)}
-                  {source.filters.filter(filter => filter.field === field).length > 2 && <small className="parameter-more">+{source.filters.filter(filter => filter.field === field).length - 2} pilihan lain · buka Pilihan ganda untuk melihat semuanya</small>}
-                </div>))}</div>}
+            {query.sources.some(source => source.filters.length > 0) && (
+              <div style={{
+                marginTop: '16px',
+                padding: '12px 16px',
+                background: '#f4f8fd',
+                border: '1px solid #d4e3f5',
+                borderRadius: '8px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+                flexWrap: 'wrap',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span className="icon-tile blue" style={{ width: '32px', height: '32px', borderRadius: '6px' }}>
+                    <SlidersHorizontal size={16} />
+                  </span>
+                  <div>
+                    <strong style={{ fontSize: '12px', color: '#1e3d64', display: 'block' }}>
+                      {query.sources.reduce((acc, s) => acc + new Set(s.filters.map(f => f.field)).size, 0)} Parameter Filter Aktif
+                    </strong>
+                    <span style={{ fontSize: '11px', color: '#627c9d' }}>
+                      Nilai parameter akan dimunculkan dalam popup sebelum query dijalankan.
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="button subtle"
+                  style={{ background: '#fff', fontSize: '11px', height: '32px' }}
+                  onClick={() => setParameterModalOpen(true)}
+                >
+                  <SlidersHorizontal size={14} /> Atur Nilai Parameter
+                </button>
+              </div>
+            )}
           </section>
           <section className="card results-card" ref={queryResultRef}><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
             <div className="results-actions">
@@ -2622,6 +2670,110 @@ function App() {
               {visibleColumns.length} dari {data.columns.length} kolom tampil
             </span>
             <button className="button primary" onClick={() => setColumnChooserOpen(false)}>Selesai</button>
+          </div>
+        </div>
+      </div>
+    )}
+    {parameterModalOpen && (
+      <div className="modal-backdrop" onClick={() => setParameterModalOpen(false)}>
+        <div className="modal-card parameter-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><SlidersHorizontal size={18} /></span>
+              <span>Parameter Filter Query</span>
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setParameterModalOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div className="parameter-modal-body">
+            <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
+              Tentukan nilai atau interval kriteria filter. Pilihan pada field yang sama digabung sebagai alternatif; field berbeda harus sama-sama terpenuhi.
+            </small>
+            {query.sources.flatMap((source, sourceIndex) => [...new Set(source.filters.map(filter => filter.field))].map(field => {
+              const meta = metadataFor(source).find(item => item.name === field)
+              return (
+                <div className="parameter-group" key={`${source.alias}-${field}`}>
+                  <div className="parameter-group-head">
+                    <strong>{source.table_name}.{field}</strong>
+                    {meta?.description && <small>{meta.description}</small>}
+                    <button className="text-button" onClick={() => openSelectionDialog(sourceIndex, field)}>
+                      <Columns3 size={14} /> Pilihan ganda
+                    </button>
+                  </div>
+                  {source.filters.map((filter, filterIndex) => filter.field !== field || source.filters.slice(0, filterIndex).filter(item => item.field === field).length >= 2 ? null : (
+                    <div className="parameter-condition" key={`${field}-${filterIndex}`}>
+                      <select aria-label="Pilihan atau pengecualian" value={filter.sign || 'I'} onChange={e => updateFilter(sourceIndex, filterIndex, { sign: e.target.value as 'I' | 'E' })}>
+                        <option value="I">Pilih</option>
+                        <option value="E">Kecualikan</option>
+                      </select>
+                      <select aria-label="Operator" value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}>
+                        <option value="EQ">Sama dengan</option>
+                        <option value="BT">Interval</option>
+                        <option value="NE">Tidak sama</option>
+                        <option value="GT">Lebih dari</option>
+                        <option value="GE">≥</option>
+                        <option value="LT">Kurang dari</option>
+                        <option value="LE">≤</option>
+                      </select>
+                      <input
+                        aria-label="Nilai awal"
+                        placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
+                        value={filter.value}
+                        onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })}
+                      />
+                      {filter.operator === 'BT' && (
+                        <>
+                          <span className="parameter-range-separator">sampai</span>
+                          <input
+                            aria-label="Nilai akhir"
+                            placeholder="Sampai"
+                            value={filter.high_value || ''}
+                            onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: e.target.value })}
+                          />
+                        </>
+                      )}
+                      <button
+                        className="icon-button"
+                        title="Hapus pilihan"
+                        aria-label={`Hapus pilihan ${field}`}
+                        onClick={() => updateSource(sourceIndex, { filters: source.filters.filter((_, index) => index !== filterIndex) })}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  {source.filters.filter(filter => filter.field === field).length > 2 && (
+                    <small className="parameter-more">
+                      +{source.filters.filter(filter => filter.field === field).length - 2} pilihan lain · buka Pilihan ganda untuk melihat semuanya
+                    </small>
+                  )}
+                </div>
+              )
+            }))}
+          </div>
+          <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+            <button className="button subtle" onClick={() => setParameterModalOpen(false)}>
+              Batal
+            </button>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                className="button subtle"
+                onClick={() => setParameterModalOpen(false)}
+              >
+                Tutup & Simpan Nilai
+              </button>
+              <button
+                className="button primary"
+                disabled={busy || !query.target}
+                onClick={() => {
+                  setParameterModalOpen(false)
+                  runQuery()
+                }}
+              >
+                <Play size={14} fill="currentColor" /> {busy ? 'Memproses…' : 'Jalankan Query'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

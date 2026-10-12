@@ -152,6 +152,9 @@ label small{font-size:11px;color:#9ba8b7;font-weight:500}
 .modal-card.formula-modal{width:min(620px,100%)}
 .modal-card.pivot-modal{width:min(880px,100%)}
 .modal-card.column-modal{width:min(680px,100%)}
+.modal-card.parameter-modal{width:min(780px,100%)}
 .formula-modal-body{padding:20px;display:grid;gap:16px}
 .pivot-modal-body{padding:20px;display:grid;gap:16px}
 .column-modal-body{padding:20px;display:grid;gap:12px}
+.parameter-modal-body{padding:20px;display:grid;gap:14px;max-height:70vh;overflow-y:auto}
+
