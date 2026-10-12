@@ -13,7 +13,7 @@ import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from '
 
 type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
 type PivotConfig = { rows: string[]; column: string; value: string; fallback_value?: string; aggregation: string }
-type CalculatedColumn = { name: string; operation: string; fields: string[] }
+type CalculatedColumn = { name: string; operation: string; fields?: string[]; expression?: string }
 type ReportDefinition = Query & { presentation?: { pivot?: PivotConfig | null; calculatedColumns?: CalculatedColumn[]; visibleColumns?: string[] } }
 type Report = { id: string; name: string; definition: ReportDefinition }
 type Credential = { connectionId: string; target?: string; hasCredential: boolean; username?: string }
@@ -308,6 +308,9 @@ function App() {
   const [formulaName, setFormulaName] = useState('')
   const [formulaOperation, setFormulaOperation] = useState('sum')
   const [formulaFields, setFormulaFields] = useState<string[]>([''])
+  const [formulaMode, setFormulaMode] = useState<'custom' | 'simple'>('custom')
+  const [formulaExpression, setFormulaExpression] = useState('')
+  const [editingFormulaIndex, setEditingFormulaIndex] = useState<number | null>(null)
   const [otherTarget, setOtherTarget] = useState('')
   const [compareTarget, setCompareTarget] = useState('')
   const [compareTable, setCompareTable] = useState('')
@@ -431,13 +434,10 @@ function App() {
     } else if (catalogModal.targetIndex !== undefined) {
       updateSource(catalogModal.targetIndex, { table_name: tableName })
     } else {
-      // Add as new table source if under 3
-      if (query.sources.length >= 3) {
-        setError('Maksimal 3 tabel pada Query Builder.')
-        setCatalogModal({ open: false })
-        return
+      let nextIndex = 0
+      while (query.sources.some(source => source.alias === `T${nextIndex + 1}`)) {
+        nextIndex++
       }
-      const nextIndex = [0, 1, 2].find(index => !query.sources.some(source => source.alias === `T${index + 1}`))!
       const next = { ...blankSource(nextIndex), table_name: tableName }
       setQuery(q => ({
         ...q,
@@ -913,7 +913,10 @@ function App() {
     const remainingCalcs: CalculatedColumn[] = []
     for (const column of calculations) {
       const available = new Set(result.columns)
-      if (column.fields.every(f => available.has(f))) {
+      const reqCols = column.expression
+        ? (column.expression.match(/\[([^\]]+)\]/g)?.map(m => m.slice(1, -1)) || [])
+        : (column.fields || [])
+      if (reqCols.every(f => available.has(f))) {
         result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
       } else {
         remainingCalcs.push(column)
@@ -939,7 +942,10 @@ function App() {
     // 3. Run remaining calculations on post-pivot columns
     for (const column of remainingCalcs) {
       const available = new Set(result.columns)
-      if (column.fields.every(f => available.has(f))) {
+      const reqCols = column.expression
+        ? (column.expression.match(/\[([^\]]+)\]/g)?.map(m => m.slice(1, -1)) || [])
+        : (column.fields || [])
+      if (reqCols.every(f => available.has(f))) {
         result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
       }
     }
@@ -975,34 +981,105 @@ function App() {
     finally { setBusy(false) }
   }
 
+  function openFormulaModal(editIndex: number | null = null) {
+    if (editIndex !== null && calculatedColumns[editIndex]) {
+      const existing = calculatedColumns[editIndex]
+      setEditingFormulaIndex(editIndex)
+      setFormulaName(existing.name)
+      if (existing.expression) {
+        setFormulaMode('custom')
+        setFormulaExpression(existing.expression)
+        setFormulaOperation('custom')
+        setFormulaFields([''])
+      } else {
+        setFormulaMode('simple')
+        setFormulaOperation(existing.operation || 'sum')
+        setFormulaFields(existing.fields?.length ? existing.fields : [''])
+        setFormulaExpression('')
+      }
+    } else {
+      setEditingFormulaIndex(null)
+      setFormulaName('')
+      setFormulaMode('custom')
+      setFormulaExpression('')
+      setFormulaOperation('sum')
+      setFormulaFields([''])
+    }
+    setFormulaOpen(true)
+  }
+
+  async function removeCalculatedColumn(index: number) {
+    const target = calculatedColumns[index]
+    if (!target) return
+    setBusy(true); setError('')
+    try {
+      const updated = calculatedColumns.filter((_, i) => i !== index)
+      const result = await applyPresentation(baseData, updated, activePivot)
+      setCalculatedColumns(updated)
+      setData(result)
+      setVisibleColumns(result.columns)
+      if (editingFormulaIndex === index) {
+        openFormulaModal(null)
+      }
+      setNotice(`Kolom hitung "${target.name}" berhasil dihapus.`)
+    } catch (e) { setError(message(e)) }
+    finally { setBusy(false) }
+  }
+
   async function runFormula() {
-    const fields = formulaFields.filter(Boolean)
     const name = formulaName.trim()
     if (!name) {
       setError('Isi nama kolom hasil.')
       return
     }
-    if (formulaOperation === 'divide' && fields.length !== 2) {
-      setError('Operasi pembagian (÷) memerlukan tepat 2 kolom sumber.')
-      return
+
+    let calculation: CalculatedColumn
+    if (formulaMode === 'custom') {
+      const expr = formulaExpression.trim()
+      if (!expr) {
+        setError('Tuliskan rumus formula (contoh: ([KolomA] * [KolomB]) / 1000).')
+        return
+      }
+      const refCols = expr.match(/\[([^\]]+)\]/g)?.map(m => m.slice(1, -1)) || []
+      if (!refCols.length) {
+        setError('Rumus harus menyertakan setidaknya satu kolom sumber dalam tanda kurung siku [Kolom].')
+        return
+      }
+      calculation = { name, operation: 'custom', expression: expr }
+    } else {
+      const fields = formulaFields.filter(Boolean)
+      if (formulaOperation === 'divide' && fields.length !== 2) {
+        setError('Operasi pembagian (÷) memerlukan tepat 2 kolom sumber.')
+        return
+      }
+      if (fields.length < (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) ? 2 : 1)) {
+        setError('Pilih minimal 2 kolom sumber.')
+        return
+      }
+      if (new Set(fields).size !== fields.length) {
+        setError('Pilih kolom sumber yang berbeda.')
+        return
+      }
+      calculation = { name, operation: formulaOperation, fields }
     }
-    if (fields.length < (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) ? 2 : 1)) {
-      setError('Pilih minimal 2 kolom sumber.')
-      return
-    }
-    if (new Set(fields).size !== fields.length) {
-      setError('Pilih kolom sumber yang berbeda.')
-      return
-    }
+
     setBusy(true); setError('')
     try {
-      const calculation = { name, operation: formulaOperation, fields }
-      const updated = [...calculatedColumns, calculation]
+      let updated: CalculatedColumn[]
+      if (editingFormulaIndex !== null && editingFormulaIndex >= 0 && editingFormulaIndex < calculatedColumns.length) {
+        updated = calculatedColumns.map((c, i) => i === editingFormulaIndex ? calculation : c)
+      } else {
+        updated = [...calculatedColumns, calculation]
+      }
       const result = await applyPresentation(baseData, updated, activePivot)
       setCalculatedColumns(updated)
       setData(result); setVisibleColumns(result.columns)
-      setFormulaOpen(false); setFormulaName(''); setFormulaFields([''])
-      setNotice(`Kolom "${name}" berhasil ditambahkan.`)
+      setFormulaOpen(false)
+      setFormulaName('')
+      setFormulaExpression('')
+      setFormulaFields([''])
+      setEditingFormulaIndex(null)
+      setNotice(editingFormulaIndex !== null ? `Kolom "${name}" berhasil diperbarui.` : `Kolom "${name}" berhasil ditambahkan.`)
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
   }
@@ -2005,7 +2082,20 @@ function App() {
             <div className="results-actions">
               <button className="button subtle" onClick={scrollToTop} title="Kembali ke atas"><ArrowUp size={15} /> Ke Atas</button>
               <button className="button subtle" onClick={() => setColumnChooserOpen(!columnChooserOpen)} disabled={!data.columns.length}><Columns3 size={16} /> Pilih Kolom</button>
-              <button className="button subtle" onClick={() => setFormulaOpen(!formulaOpen)} disabled={!baseData.rows.length}><Plus size={16} /> Kolom Hitung</button>
+              <button
+                className="button subtle"
+                onClick={() => openFormulaModal(null)}
+                disabled={!baseData.rows.length}
+                title="Kelola & Tambah Kolom Hitung"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Plus size={16} /> Kolom Hitung
+                {calculatedColumns.length > 0 && (
+                  <span className="count-pill" style={{ marginLeft: '2px', background: '#e1ecf8', color: '#1d5cb4' }}>
+                    {calculatedColumns.length}
+                  </span>
+                )}
+              </button>
               <button className="button subtle" onClick={() => setPivotOpen(!pivotOpen)} disabled={!data.rows.length}><Settings2 size={16} /> Pivot Data</button>
               <button className="button subtle" onClick={exportData} disabled={!data.rows.length}><Download size={16} /> Excel</button>
             </div></div>
@@ -2876,85 +2966,241 @@ function App() {
     )}
     {formulaOpen && (
       <div className="modal-backdrop" onClick={() => setFormulaOpen(false)}>
-        <div className="modal-card formula-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-card formula-modal" onClick={e => e.stopPropagation()} style={{ width: 'min(720px, 100%)' }}>
           <div className="modal-head">
             <div className="modal-title">
               <span className="modal-title-icon blue"><Plus size={18} /></span>
-              <span>Kolom Hitung</span>
+              <span>{editingFormulaIndex !== null ? 'Edit Kolom Hitung' : 'Pengaturan Kolom Hitung'}</span>
             </div>
             <button className="icon-button" title="Tutup" onClick={() => setFormulaOpen(false)}>
               <X size={16} />
             </button>
           </div>
-          <div className="formula-modal-body">
-            <small style={{ color: '#687b92', fontSize: '11px' }}>
-              Hitung per baris dari kolom yang dipilih tanpa menulis rumus. Untuk rata-rata antarbaris, gunakan AVERAGE di Pivot.
-            </small>
-            <div className="designer-grid">
+          <div className="formula-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxHeight: '78vh', overflowY: 'auto' }}>
+            {calculatedColumns.length > 0 && (
+              <div style={{ background: '#f8fbff', border: '1px solid #dce8f6', borderRadius: '8px', padding: '12px 14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#274b77' }}>
+                    Daftar Kolom Hitung Aktif ({calculatedColumns.length})
+                  </span>
+                  {editingFormulaIndex !== null && (
+                    <button
+                      type="button"
+                      className="text-button"
+                      style={{ fontSize: '10px' }}
+                      onClick={() => openFormulaModal(null)}
+                    >
+                      + Buat Kolom Baru
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {calculatedColumns.map((calc, idx) => {
+                    const isEditing = editingFormulaIndex === idx
+                    return (
+                      <div
+                        key={calc.name}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '6px 10px',
+                          background: isEditing ? '#e8f2fe' : '#fff',
+                          border: isEditing ? '1px solid #7cb3f3' : '1px solid #e2ecf7',
+                          borderRadius: '6px',
+                          fontSize: '11px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, overflow: 'hidden' }}>
+                          <strong style={{ color: '#1f3c64' }}>{calc.name}</strong>
+                          <span style={{ color: '#7a8fa9', fontSize: '10.5px' }}>
+                            {calc.expression
+                              ? `= ${calc.expression}`
+                              : `[${calc.operation?.toUpperCase()}] ${(calc.fields || []).join(', ')}`}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            className="button subtle"
+                            style={{ padding: '0.2rem 0.5rem', height: '26px', fontSize: '10px', gap: '4px' }}
+                            title="Edit kolom ini"
+                            onClick={() => openFormulaModal(idx)}
+                          >
+                            <Edit2 size={12} /> Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="Hapus kolom ini"
+                            onClick={() => removeCalculatedColumn(idx)}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #e2ecf7', paddingBottom: '6px' }}>
+              <button
+                type="button"
+                className={`matrix-filter-btn ${formulaMode === 'custom' ? 'active' : ''}`}
+                style={{ fontSize: '11px', padding: '6px 12px' }}
+                onClick={() => setFormulaMode('custom')}
+              >
+                Formula Fleksibel (Multiple Operasi)
+              </button>
+              <button
+                type="button"
+                className={`matrix-filter-btn ${formulaMode === 'simple' ? 'active' : ''}`}
+                style={{ fontSize: '11px', padding: '6px 12px' }}
+                onClick={() => setFormulaMode('simple')}
+              >
+                Operasi Tunggal Sederhana
+              </button>
+            </div>
+
+            <div className="designer-grid" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
               <label>
-                Nama kolom hasil
+                Nama Kolom Hasil
                 <input
-                  placeholder="Contoh: Total Berat atau RATA_RATA"
+                  placeholder="Contoh: Total_Volume, Berat_Kotor, atau Luas_m2"
                   value={formulaName}
                   onChange={e => setFormulaName(e.target.value)}
                 />
               </label>
-              <label>
-                Operasi
-                <select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
-                  <option value="sum">SUM · Jumlah</option>
-                  <option value="average">AVERAGE · Rata-rata</option>
-                  <option value="min">MIN · Terkecil</option>
-                  <option value="max">MAX · Terbesar</option>
-                  <option value="subtract">Kurang (−)</option>
-                  <option value="multiply">Kali (×)</option>
-                  <option value="divide">Bagi (÷)</option>
-                </select>
-              </label>
             </div>
-            <div className="designer-fields">
-              <strong>Kolom sumber</strong>
-              {formulaFields.map((field, index) => (
-                <div className="designer-field-row" key={index}>
-                  <select
-                    value={field}
-                    onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}
-                  >
-                    <option value="">Pilih kolom {index + 1}</option>
-                    {formulaSourceColumns.filter(column => column !== formulaName).map(column => (
-                      <option key={column} value={column}>
-                        {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  {formulaFields.length > 1 && (
-                    <button
-                      className="icon-button"
-                      title="Hapus kolom"
-                      onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
+
+            {formulaMode === 'custom' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <label style={{ display: 'grid', gap: '5px', fontSize: '10px', color: '#4a6383', fontWeight: 700 }}>
+                  Rumus Matematika Bebas
+                  <input
+                    style={{ height: '38px', fontFamily: 'monospace', fontSize: '12px', padding: '0 10px' }}
+                    placeholder="Contoh: ([Panjang] * [Lebar] * [Thickness]) / 1000"
+                    value={formulaExpression}
+                    onChange={e => setFormulaExpression(e.target.value)}
+                  />
+                </label>
+                <div style={{ fontSize: '10.5px', color: '#687b92', lineHeight: 1.4 }}>
+                  Mendukung operasi gabungan seperti <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>, tanda kurung <code>()</code>, dan konstanta angka.
                 </div>
-              ))}
-              <button
-                className="text-button"
-                onClick={() => setFormulaFields(current => [...current, ''])}
-                disabled={formulaOperation === 'divide' ? formulaFields.length >= 2 : formulaFields.length >= 12}
-              >
-                <Plus size={14} /> Tambah kolom sumber
-              </button>
-            </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', background: '#f9fbfe', padding: '10px 12px', borderRadius: '6px', border: '1px solid #e4edf8' }}>
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#38577e' }}>
+                    Klik Kolom di Bawah Ini untuk Memasukkan ke Rumus:
+                  </span>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', maxHeight: '130px', overflowY: 'auto' }}>
+                    {formulaSourceColumns.filter(column => column !== formulaName).map(col => (
+                      <button
+                        key={col}
+                        type="button"
+                        className="button subtle"
+                        style={{ height: '26px', fontSize: '10.5px', padding: '0 8px', background: '#fff' }}
+                        title={`Tambahkan [${col}] ke dalam rumus`}
+                        onClick={() => {
+                          setFormulaExpression(prev => prev ? `${prev} [${col}]` : `[${col}]`)
+                        }}
+                      >
+                        + [{col}]
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#38577e' }}>Simbol Cepat:</span>
+                  {['+', '-', '*', '/', '(', ')', '100', '1000'].map(sym => (
+                    <button
+                      key={sym}
+                      type="button"
+                      className="button subtle"
+                      style={{ height: '24px', fontSize: '11px', padding: '0 7px' }}
+                      onClick={() => setFormulaExpression(prev => prev ? `${prev} ${sym}` : sym)}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="text-button"
+                    style={{ fontSize: '10px', marginLeft: 'auto' }}
+                    onClick={() => setFormulaExpression('')}
+                  >
+                    Bersihkan Rumus
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div className="designer-grid">
+                  <label>
+                    Operasi
+                    <select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
+                      <option value="sum">SUM · Jumlah</option>
+                      <option value="average">AVERAGE · Rata-rata</option>
+                      <option value="min">MIN · Terkecil</option>
+                      <option value="max">MAX · Terbesar</option>
+                      <option value="subtract">Kurang (−)</option>
+                      <option value="multiply">Kali (×)</option>
+                      <option value="divide">Bagi (÷)</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="designer-fields">
+                  <strong>Kolom sumber</strong>
+                  {formulaFields.map((field, index) => (
+                    <div className="designer-field-row" key={index}>
+                      <select
+                        value={field}
+                        onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}
+                      >
+                        <option value="">Pilih kolom {index + 1}</option>
+                        {formulaSourceColumns.filter(column => column !== formulaName).map(column => (
+                          <option key={column} value={column}>
+                            {column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {formulaFields.length > 1 && (
+                        <button
+                          className="icon-button"
+                          title="Hapus kolom"
+                          onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    className="text-button"
+                    onClick={() => setFormulaFields(current => [...current, ''])}
+                    disabled={formulaOperation === 'divide' ? formulaFields.length >= 2 : formulaFields.length >= 12}
+                  >
+                    <Plus size={14} /> Tambah kolom sumber
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <div className="modal-actions">
             <button className="button subtle" onClick={() => setFormulaOpen(false)}>Batal</button>
             <button
               className="button primary"
               onClick={runFormula}
-              disabled={!formulaName.trim() || !formulaFields.every(Boolean) || (formulaOperation === 'divide' && formulaFields.length !== 2) || (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) && formulaFields.length < 2)}
+              disabled={
+                !formulaName.trim() ||
+                (formulaMode === 'custom'
+                  ? !formulaExpression.trim()
+                  : (!formulaFields.every(Boolean) || (formulaOperation === 'divide' && formulaFields.length !== 2) || (['sum', 'average', 'subtract', 'multiply'].includes(formulaOperation) && formulaFields.length < 2)))
+              }
             >
-              Buat Kolom
+              {editingFormulaIndex !== null ? 'Simpan Perubahan' : 'Buat Kolom'}
             </button>
           </div>
         </div>

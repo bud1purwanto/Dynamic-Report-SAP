@@ -153,8 +153,9 @@ class PivotIn(BaseModel):
 class CalculatedColumnIn(BaseModel):
     rows: list[dict[str, Any]] = Field(max_length=10000)
     name: str
-    operation: str
-    fields: list[str] = Field(min_length=1, max_length=12)
+    operation: str = "custom"
+    fields: list[str] = Field(default_factory=list, max_length=50)
+    expression: str | None = None
 
 
 class FormulaIn(BaseModel):
@@ -1261,13 +1262,93 @@ async def calculated_column(dto: CalculatedColumnIn, auth: tuple[AppSession, str
     return calculated_column_data(dto)
 
 
+def evaluate_formula(node: ast.AST, values: dict[str, float]) -> float:
+    if isinstance(node, ast.Expression):
+        return evaluate_formula(node.body, values)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return float(node.value)
+    if isinstance(node, ast.Name) and node.id in values:
+        return values[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = evaluate_formula(node.operand, values)
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+        left, right = evaluate_formula(node.left, values), evaluate_formula(node.right, values)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        return left / right
+    raise ValueError("Formula hanya mendukung angka, referensi [KOLOM], +, -, *, /, dan kurung.")
+
+
+def extract_referenced_columns(expression: str) -> list[str]:
+    # Extracts all column names inside brackets [Column Name]
+    return list(dict.fromkeys(re.findall(r"\[([^\]]+)\]", expression)))
+
+
+def run_formula_rows(rows: list[dict[str, Any]], name: str, expression: str, columns: list[str]) -> list[dict[str, Any]]:
+    referenced = extract_referenced_columns(expression)
+    for col in referenced:
+        if col not in columns:
+            raise HTTPException(422, f"Kolom [{col}] pada rumus tidak ditemukan.")
+    clean_expr = expression
+    for i, col in enumerate(referenced):
+        clean_expr = clean_expr.replace(f"[{col}]", f"v{i}")
+    try:
+        tree = ast.parse(clean_expr, mode="eval")
+    except SyntaxError as exc:
+        raise HTTPException(422, f"Format rumus matematika tidak valid: {exc}") from None
+    output = []
+    for row in rows:
+        values = {}
+        has_any_val = False
+        for i, col in enumerate(referenced):
+            raw = row.get(col)
+            if raw is not None and str(raw).strip() != "":
+                try:
+                    val = float(str(raw).strip())
+                    if math.isfinite(val):
+                        values[f"v{i}"] = val
+                        has_any_val = True
+                    else:
+                        values[f"v{i}"] = 0.0
+                except (ValueError, TypeError):
+                    values[f"v{i}"] = 0.0
+            else:
+                values[f"v{i}"] = 0.0
+        try:
+            res = evaluate_formula(tree, values)
+            if not pd.notna(res) or abs(res) == float("inf"):
+                val_res = None
+            else:
+                val_res = round(res, 6)
+        except ZeroDivisionError:
+            val_res = None
+        except Exception:
+            val_res = None
+        output.append({**row, name: val_res})
+    return output
+
+
 def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
     name = dto.name.strip()
     if not name or len(name) > 100:
         raise HTTPException(422, "Nama kolom hasil tidak valid.")
     columns = list(dict.fromkeys(key for row in dto.rows for key in row))
-    if name in columns:
-        raise HTTPException(422, "Nama kolom hasil sudah ada.")
+
+    # Mode 1: Custom Formula Expression (e.g. ([Panjang] * [Lebar]) / 1000)
+    if dto.operation == "custom" or dto.expression:
+        expr = (dto.expression or "").strip()
+        if not expr:
+            raise HTTPException(422, "Rumus formula tidak boleh kosong.")
+        output = run_formula_rows(dto.rows, name, expr, columns)
+        new_cols = [*columns, name] if name not in columns else columns
+        return {"columns": new_cols, "rows": output}
+
+    # Mode 2: Standard Aggregation & Arithmetic
     if any(field not in columns for field in dto.fields) or len(set(dto.fields)) != len(dto.fields):
         raise HTTPException(422, "Pilih kolom sumber yang tersedia dan berbeda.")
     aggregate = dto.operation in ("sum", "average", "min", "max")
@@ -1295,13 +1376,11 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
                      "min": lambda: min(numbers), "max": lambda: max(numbers)}[dto.operation]()
         elif binary and len(values) == len(dto.fields) and all(v is not None for v in values):
             if dto.operation == "subtract":
-                # Chained subtraction: a - b - c ...
                 res = values[0]
                 for v in values[1:]:
                     res -= v
                 value = res
             elif dto.operation == "multiply":
-                # Chained multiplication: a * b * c ...
                 res = 1.0
                 for v in values:
                     res *= v
@@ -1309,7 +1388,8 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
             elif dto.operation == "divide" and len(values) == 2 and values[1] != 0:
                 value = values[0] / values[1]
         output.append({**row, name: round(value, 6) if value is not None else None})
-    return {"columns": [*columns, name], "rows": output}
+    new_cols = [*columns, name] if name not in columns else columns
+    return {"columns": new_cols, "rows": output}
 
 
 def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1322,7 +1402,10 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
     remaining_calcs = []
     for calculation in calcs:
         current_cols = set(dict.fromkeys(k for r in rows for k in r))
-        if all(field in current_cols for field in calculation.get("fields", [])):
+        req_fields = calculation.get("fields", [])
+        if calculation.get("expression"):
+            req_fields = extract_referenced_columns(calculation["expression"])
+        if all(field in current_cols for field in req_fields):
             rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
         else:
             remaining_calcs.append(calculation)
@@ -1340,7 +1423,10 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
     # Run any remaining calculations that target post-pivot columns
     for calculation in remaining_calcs:
         current_cols = set(dict.fromkeys(k for r in rows for k in r))
-        if all(field in current_cols for field in calculation.get("fields", [])):
+        req_fields = calculation.get("fields", [])
+        if calculation.get("expression"):
+            req_fields = extract_referenced_columns(calculation["expression"])
+        if all(field in current_cols for field in req_fields):
             rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
 
     visible = presentation.get("visibleColumns")
@@ -1349,56 +1435,15 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
     return rows
 
 
-def evaluate_formula(node: ast.AST, values: dict[str, float]) -> float:
-    if isinstance(node, ast.Expression):
-        return evaluate_formula(node.body, values)
-    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-        return float(node.value)
-    if isinstance(node, ast.Name) and node.id in values:
-        return values[node.id]
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        value = evaluate_formula(node.operand, values)
-        return value if isinstance(node.op, ast.UAdd) else -value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-        left, right = evaluate_formula(node.left, values), evaluate_formula(node.right, values)
-        if isinstance(node.op, ast.Add):
-            return left + right
-        if isinstance(node.op, ast.Sub):
-            return left - right
-        if isinstance(node.op, ast.Mult):
-            return left * right
-        return left / right
-    raise ValueError("Formula hanya mendukung angka, referensi [KOLOM], +, -, *, /, dan kurung.")
-
-
 @app.post("/api/data/formula")
 async def formula(dto: FormulaIn, auth: tuple[AppSession, str] = Depends(get_token)):
-    if not IDENT.fullmatch(dto.name):
-        raise HTTPException(422, "Nama kolom formula tidak valid.")
+    name = dto.name.strip()
+    if not name:
+        raise HTTPException(422, "Nama kolom formula tidak boleh kosong.")
     columns = list(dict.fromkeys(k for row in dto.rows for k in row))
-    if dto.name in columns:
-        raise HTTPException(422, "Nama kolom formula sudah ada.")
-    referenced: list[str] = []
-    def replace(match: re.Match[str]) -> str:
-        field = match.group(1)
-        if field not in columns:
-            raise HTTPException(422, f"Kolom {field} tidak ada.")
-        if field not in referenced:
-            referenced.append(field)
-        return f"v{referenced.index(field)}"
-    expression = re.sub(r"\[([A-Za-z_][A-Za-z0-9_.]*)\]", replace, dto.expression)
-    try:
-        tree = ast.parse(expression, mode="eval")
-        output = []
-        for row in dto.rows:
-            values = {f"v{i}": float(row.get(field) or 0) for i, field in enumerate(referenced)}
-            result = evaluate_formula(tree, values)
-            if not pd.notna(result) or abs(result) == float("inf"):
-                raise ValueError("Hasil formula tidak terbatas.")
-            output.append({**row, dto.name: round(result, 6)})
-    except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError) as exc:
-        raise HTTPException(422, f"Formula gagal: {exc}") from None
-    return {"columns": columns + [dto.name], "rows": output}
+    output = run_formula_rows(dto.rows, name, dto.expression, columns)
+    new_cols = [*columns, name] if name not in columns else columns
+    return {"columns": new_cols, "rows": output}
 
 
 @app.post("/api/sap/compare")
