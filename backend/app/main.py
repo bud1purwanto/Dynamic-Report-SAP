@@ -1216,10 +1216,11 @@ async def calculated_column(dto: CalculatedColumnIn, auth: tuple[AppSession, str
 
 
 def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
-    if not IDENT.fullmatch(dto.name):
+    name = dto.name.strip()
+    if not name or len(name) > 100:
         raise HTTPException(422, "Nama kolom hasil tidak valid.")
     columns = list(dict.fromkeys(key for row in dto.rows for key in row))
-    if dto.name in columns:
+    if name in columns:
         raise HTTPException(422, "Nama kolom hasil sudah ada.")
     if any(field not in columns for field in dto.fields) or len(set(dto.fields)) != len(dto.fields):
         raise HTTPException(422, "Pilih kolom sumber yang tersedia dan berbeda.")
@@ -1247,19 +1248,35 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
             if dto.operation == "subtract": value = left - right
             if dto.operation == "multiply": value = left * right
             if dto.operation == "divide" and right != 0: value = left / right
-        output.append({**row, dto.name: round(value, 6) if value is not None else None})
-    return {"columns": [*columns, dto.name], "rows": output}
+        output.append({**row, name: round(value, 6) if value is not None else None})
+    return {"columns": [*columns, name], "rows": output}
 
 
 def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not presentation:
         return rows
-    for calculation in presentation.get("calculatedColumns") or []:
-        rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+    calcs = presentation.get("calculatedColumns") or []
     pivot_config = presentation.get("pivot")
+    
+    # Run calculations that target pre-pivot columns first
+    remaining_calcs = []
+    for calculation in calcs:
+        current_cols = set(dict.fromkeys(k for r in rows for k in r))
+        if all(field in current_cols for field in calculation.get("fields", [])):
+            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+        else:
+            remaining_calcs.append(calculation)
+            
     if pivot_config:
         rows = pivot_data(PivotIn(rows=rows, index=pivot_config["rows"], columns=pivot_config["column"],
                                   values=pivot_config["value"], aggregation=pivot_config["aggregation"]))["rows"]
+                                  
+    # Run any remaining calculations that target post-pivot columns
+    for calculation in remaining_calcs:
+        current_cols = set(dict.fromkeys(k for r in rows for k in r))
+        if all(field in current_cols for field in calculation.get("fields", [])):
+            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+
     visible = presentation.get("visibleColumns")
     if visible:
         rows = [{key: row.get(key) for key in visible if key in row} for row in rows]

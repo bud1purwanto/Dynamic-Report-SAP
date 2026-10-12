@@ -845,17 +845,37 @@ function App() {
 
   async function applyPresentation(raw: GridData, calculations: CalculatedColumn[], pivot: PivotConfig | null): Promise<GridData> {
     let result = raw
-    for (const column of calculations) {
-      result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
-    }
     if (!result.rows.length) return result
+
+    // 1. Run calculations on pre-pivot columns first
+    const remainingCalcs: CalculatedColumn[] = []
+    for (const column of calculations) {
+      const available = new Set(result.columns)
+      if (column.fields.every(f => available.has(f))) {
+        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
+      } else {
+        remainingCalcs.push(column)
+      }
+    }
+
+    // 2. Apply pivot if configured
     if (pivot) {
       const available = new Set(result.columns)
       const rows = pivot.rows.filter(column => available.has(column))
-      if (!rows.length || !available.has(pivot.column) || !available.has(pivot.value)) return result
-      result = await post<GridData>('/data/pivot', { rows: result.rows, index: rows,
-        columns: pivot.column, values: pivot.value, aggregation: pivot.aggregation })
+      if (rows.length && available.has(pivot.column) && available.has(pivot.value)) {
+        result = await post<GridData>('/data/pivot', { rows: result.rows, index: rows,
+          columns: pivot.column, values: pivot.value, aggregation: pivot.aggregation })
+      }
     }
+
+    // 3. Run remaining calculations on post-pivot columns
+    for (const column of remainingCalcs) {
+      const available = new Set(result.columns)
+      if (column.fields.every(f => available.has(f))) {
+        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
+      }
+    }
+
     return result
   }
 
@@ -1256,6 +1276,12 @@ function App() {
     const raw = baseData.columns.length ? baseData.columns : queryFieldColumns
     return Array.from(new Set([...raw, ...calculatedColumns.map(column => column.name)]))
   }, [baseData.columns, queryFieldColumns, calculatedColumns])
+  const formulaSourceColumns = useMemo(() => {
+    if (activePivot && data.columns.length > 0) {
+      return data.columns
+    }
+    return sourceColumns
+  }, [activePivot, data.columns, sourceColumns])
   const columns = useMemo<ColDef<Row>[]>(() => visibleColumns
     .filter(c => data.columns.includes(c))
     .map(c => ({
@@ -1654,7 +1680,7 @@ function App() {
               <div className="designer-grid"><label>Nama kolom hasil<input placeholder="Contoh: RATA_RATA" value={formulaName} onChange={e => setFormulaName(e.target.value.toUpperCase())} /></label>
                 <label>Operasi<select value={formulaOperation} onChange={e => { setFormulaOperation(e.target.value); setFormulaFields(['']) }}>
                   <option value="sum">SUM · Jumlah</option><option value="average">AVERAGE · Rata-rata</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option><option value="subtract">Kurang (−)</option><option value="multiply">Kali (×)</option><option value="divide">Bagi (÷)</option></select></label></div>
-              <div className="designer-fields"><strong>Kolom sumber</strong>{formulaFields.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih kolom {index + 1}</option>{sourceColumns.filter(column => column !== formulaName).map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>
+              <div className="designer-fields"><strong>Kolom sumber</strong>{formulaFields.map((field, index) => <div className="designer-field-row" key={index}><select value={field} onChange={e => setFormulaFields(current => current.map((item, i) => i === index ? e.target.value : item))}><option value="">Pilih kolom {index + 1}</option>{formulaSourceColumns.filter(column => column !== formulaName).map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select>
                 {formulaFields.length > 1 && <button className="icon-button" title="Hapus kolom" onClick={() => setFormulaFields(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button>}</div>)}
                 <button className="text-button" onClick={() => setFormulaFields(current => [...current, ''])} disabled={['subtract', 'multiply', 'divide'].includes(formulaOperation) ? formulaFields.length >= 2 : formulaFields.length >= 12}><Plus size={14} /> Tambah kolom sumber</button></div>
               <div className="designer-actions"><button className="button primary" onClick={runFormula} disabled={!formulaName || !formulaFields.every(Boolean) || (['subtract', 'multiply', 'divide'].includes(formulaOperation) && formulaFields.length !== 2)}>Buat kolom</button></div></div>}
