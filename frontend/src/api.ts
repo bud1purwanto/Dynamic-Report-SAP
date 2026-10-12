@@ -26,7 +26,7 @@ export type Server = {
   is_production?: boolean
 }
 export type Source = { alias: string; table_name: string; fields: string[];
-  filters: { field: string; operator: string; value: string }[] }
+  filters: { field: string; operator: string; value: string; high_value?: string; sign?: 'I' | 'E' }[] }
 export type JoinCondition = { left_field: string; right_field: string }
 export type Join = { left_alias: string; left_field: string; right_alias: string; right_field: string;
   how: string; conditions?: JoinCondition[]; manual?: boolean }

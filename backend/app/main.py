@@ -117,13 +117,15 @@ class FilterIn(BaseModel):
     field: str
     operator: str = "EQ"
     value: str = Field(max_length=80)
+    high_value: str = Field(default="", max_length=80)
+    sign: str = "I"
 
 
 class ReadIn(BaseModel):
     target: str = Field(min_length=1)
     table_name: str
     fields: list[str] = Field(min_length=1, max_length=100)
-    filters: list[FilterIn] = Field(default_factory=list, max_length=10)
+    filters: list[FilterIn] = Field(default_factory=list, max_length=30)
     rowcount: int = Field(default=100, ge=1, le=1000)
 
 
@@ -171,7 +173,7 @@ class SourceIn(BaseModel):
     alias: str
     table_name: str
     fields: list[str] = Field(default_factory=list, max_length=100)
-    filters: list[FilterIn] = Field(default_factory=list, max_length=10)
+    filters: list[FilterIn] = Field(default_factory=list, max_length=30)
 
 
 class JoinConditionIn(BaseModel):
@@ -583,20 +585,84 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
     return fields, raw
 
 
+def build_sap_where(filters: list[FilterIn]) -> list[str]:
+    operators = {"EQ": "=", "NE": "<>", "GT": ">", "GE": ">=", "LT": "<", "LE": "<="}
+    grouped: dict[str, dict[str, list[str]]] = {}
+    include_equals: dict[str, list[str]] = {}
+    for item in filters:
+        if not IDENT.fullmatch(item.field) or item.operator not in (*operators, "BT") or item.sign not in ("I", "E"):
+            raise HTTPException(422, "Filter SAP tidak valid.")
+        if not item.value.strip():
+            continue
+        field = item.field.upper()
+        low = item.value.replace("'", "''")
+        if item.operator == "EQ" and item.sign == "I":
+            include_equals.setdefault(field, []).append(low)
+            grouped.setdefault(field, {"I": [], "E": []})
+            continue
+        if item.operator == "BT":
+            if not item.high_value.strip():
+                raise HTTPException(422, f"Isi nilai akhir interval {field}.")
+            high = item.high_value.replace("'", "''")
+            condition = f"({field} >= '{low}' AND {field} <= '{high}')"
+        else:
+            condition = f"{field} {operators[item.operator]} '{low}'"
+        if len(condition) > 72:
+            raise HTTPException(422, f"Nilai filter {field} terlalu panjang.")
+        grouped.setdefault(field, {"I": [], "E": []})[item.sign].append(condition)
+    clauses = []
+    for field, selections in grouped.items():
+        values = include_equals.get(field, [])
+        if values:
+            if len(values) == 1:
+                selections["I"].insert(0, f"{field} = '{values[0]}'")
+            else:
+                value_list = ",".join("'" + value + "'" for value in values)
+                selections["I"].insert(0, f"{field} IN ({value_list})")
+        if selections["I"]:
+            clauses.append(selections["I"][0] if len(selections["I"]) == 1
+                           else "(" + " OR ".join(selections["I"]) + ")")
+        for condition in selections["E"]:
+            clauses.append(f"NOT ({condition})")
+    if not clauses:
+        return []
+    expression = " AND ".join(clauses)
+    # RFC_READ_TABLE accepts an array of 72-character option lines.
+    words = []
+    token = ""
+    quoted = False
+    for char in expression:
+        if char == "'":
+            quoted = not quoted
+        if char == " " and not quoted:
+            if token:
+                words.append(token)
+                token = ""
+        else:
+            token += char
+    if token:
+        words.append(token)
+    lines: list[str] = []
+    line = ""
+    for word in words:
+        candidate = f"{line} {word}" if line else word
+        if len(candidate) > 72:
+            if not line:
+                raise HTTPException(422, "Nilai filter SAP terlalu panjang.")
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return lines
+
+
 async def read_rows(dto: ReadIn, token: str) -> list[dict[str, Any]]:
     target = match_target(await user_catalog(token), dto.target)
     if not IDENT.fullmatch(dto.table_name) or any(not IDENT.fullmatch(f) for f in dto.fields):
         raise HTTPException(422, "Nama tabel atau field tidak valid.")
-    where = []
-    operators = {"EQ": "=", "NE": "<>", "GT": ">", "GE": ">=", "LT": "<", "LE": "<="}
-    for item in dto.filters:
-        if not IDENT.fullmatch(item.field) or item.operator not in operators:
-            raise HTTPException(422, "Filter SAP tidak valid.")
-        escaped = item.value.replace("'", "''")
-        condition = f"{item.field.upper()} {operators[item.operator]} '{escaped}'"
-        if len(condition) > 72:
-            raise HTTPException(422, "Filter SAP terlalu panjang.")
-        where.append(condition)
+    where = build_sap_where(dto.filters)
     name, schema = await read_tool_contract(token)
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     table_arg = next((k for k in ("table_name", "table", "tablename") if k in properties), "table_name")
@@ -617,10 +683,7 @@ async def read_rows(dto: ReadIn, token: str) -> list[dict[str, Any]]:
         "resource_key": target["resource_key"],
     }
     if where:
-        combined = " AND ".join(where)
-        if len(combined) > 72:
-            raise HTTPException(422, "Gabungan filter SAP melebihi 72 karakter.")
-        arguments["where"] = [combined]
+        arguments["where"] = where
     result = await rpc_call(token, dto.target, name, arguments)
     return unpack_rows(result)
 
@@ -975,6 +1038,11 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                             ]
                             if len(distinct_vals) == 1:
                                 source_filters.append(FilterIn(field=right_col, operator="EQ", value=distinct_vals[0]))
+                            elif len(distinct_vals) <= 30 - len(source_filters):
+                                source_filters.extend(
+                                    FilterIn(field=right_col, operator="EQ", value=value)
+                                    for value in distinct_vals
+                                )
                             elif len(distinct_vals) == 0 and len(left_df) > 0:
                                 warnings.append(
                                     f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
@@ -1119,9 +1187,12 @@ def pivot_data(dto: PivotIn) -> dict[str, Any]:
     if not index_fields or len(index_fields) > 6 or len(set(index_fields)) != len(index_fields):
         raise HTTPException(422, "Pilih 1–6 kolom Baris yang berbeda.")
     frame = pd.DataFrame(dto.rows)
-    for name in (*index_fields, dto.columns, dto.values):
-        if name not in frame.columns:
-            raise HTTPException(422, f"Kolom {name} tidak ada.")
+    # A saved pivot can outlive a changed report selection.  Keep any row
+    # dimensions that still exist instead of failing the whole report because
+    # a former display/filter field is no longer returned by the query.
+    index_fields = [name for name in index_fields if name in frame.columns]
+    if not index_fields or dto.columns not in frame.columns or dto.values not in frame.columns:
+        return {"columns": list(frame.columns), "rows": dto.rows}
     if dto.columns in index_fields or dto.values in index_fields or dto.values == dto.columns:
         raise HTTPException(422, "Kolom Baris, Kolom, dan Nilai harus berbeda.")
     try:

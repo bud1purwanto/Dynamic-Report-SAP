@@ -245,6 +245,27 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["where"], ["MATNR = 'O''NEIL'"])
         self.assertEqual(result[0]["MATNR"], "O'NEIL")
 
+    def test_multiple_selection_and_interval_filters(self):
+        filters = [
+            main.FilterIn(field="CHARG", value="001"),
+            main.FilterIn(field="CHARG", value="005", operator="BT", high_value="009"),
+            main.FilterIn(field="CHARG", value="007", sign="E"),
+            main.FilterIn(field="WERKS", value="1000"),
+        ]
+        where = main.build_sap_where(filters)
+        self.assertTrue(all(len(line) <= 72 for line in where))
+        expression = " ".join(where)
+        self.assertIn("(CHARG = '001' OR (CHARG >= '005' AND CHARG <= '009'))", expression)
+        self.assertIn("NOT (CHARG = '007')", expression)
+        self.assertIn("AND WERKS = '1000'", expression)
+
+    def test_multiple_equal_filters_use_in(self):
+        where = main.build_sap_where([
+            main.FilterIn(field="CHARG", value="0000366399"),
+            main.FilterIn(field="CHARG", value="0000366400"),
+        ])
+        self.assertEqual(where, ["CHARG IN ('0000366399','0000366400')"])
+
     async def test_formula_rejects_calls(self):
         with self.assertRaises(HTTPException) as raised:
             await main.formula(main.FormulaIn(

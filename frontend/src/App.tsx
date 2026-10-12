@@ -5,7 +5,7 @@ import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodes
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
   AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
-  Edit2, GitCompareArrows, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
+  Edit2, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Play, Plus, Save, Search,
   Settings2, ShieldCheck, Table2, Trash2, X,
 } from 'lucide-react'
 import { api, post } from './api'
@@ -22,6 +22,8 @@ type Variant = { id: string; name: string; layout: {
   columnState?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getColumnState']>
   filterModel?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getFilterModel']>
 } }
+type SelectionTab = 'include_values' | 'include_ranges' | 'exclude_values' | 'exclude_ranges'
+type SelectionDialog = { sourceIndex: number; field: string; tab: SelectionTab; entries: Record<SelectionTab, string> }
 type CompareVariant = {
   id: string
   name: string
@@ -278,6 +280,9 @@ function App() {
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
   const [columnChooserOpen, setColumnChooserOpen] = useState(false)
   const [columnChooserSearch, setColumnChooserSearch] = useState('')
+  const [draggedColumn, setDraggedColumn] = useState<string | null>(null)
+  const [dropColumn, setDropColumn] = useState<string | null>(null)
+  const [selectionDialog, setSelectionDialog] = useState<SelectionDialog | null>(null)
   const [resultPage, setResultPage] = useState(1)
   const [resultPageSize, setResultPageSize] = useState(25)
   const [resultSortCol, setResultSortCol] = useState<string | null>(null)
@@ -643,6 +648,47 @@ function App() {
       i === filterIndex ? { ...filter, ...patch } : filter) })
   }
 
+  function openSelectionDialog(sourceIndex: number, field: string) {
+    const filters = query.sources[sourceIndex].filters.filter(filter => filter.field === field)
+    const entries = {} as Record<SelectionTab, string>
+    for (const [tab, sign, operator] of [
+      ['include_values', 'I', 'EQ'], ['include_ranges', 'I', 'BT'],
+      ['exclude_values', 'E', 'EQ'], ['exclude_ranges', 'E', 'BT'],
+    ] as const) {
+      entries[tab] = filters.filter(filter => (filter.sign || 'I') === sign && filter.operator === operator)
+        .map(filter => operator === 'BT' ? `${filter.value}\t${filter.high_value || ''}` : filter.value).join('\n')
+    }
+    setSelectionDialog({ sourceIndex, field, tab: 'include_values', entries })
+  }
+
+  function saveSelectionDialog() {
+    if (!selectionDialog) return
+    const { sourceIndex, field, entries } = selectionDialog
+    const source = query.sources[sourceIndex]
+    const selected: Source['filters'] = []
+    for (const [tab, sign, operator] of [
+      ['include_values', 'I', 'EQ'], ['include_ranges', 'I', 'BT'],
+      ['exclude_values', 'E', 'EQ'], ['exclude_ranges', 'E', 'BT'],
+    ] as const) {
+      for (const raw of entries[tab].split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+        if (operator === 'BT') {
+          const [value, high_value, ...rest] = raw.split(/[\t;,]/).map(value => value.trim())
+          if (!value || !high_value || rest.length) { setError('Interval harus berisi dua nilai per baris, dipisahkan Tab, titik koma, atau koma.'); return }
+          selected.push({ field, operator, value, high_value, sign })
+        } else {
+          for (const value of raw.split(/[\t;,]/).map(value => value.trim()).filter(Boolean)) {
+            selected.push({ field, operator, value, sign })
+          }
+        }
+      }
+    }
+    const retained = source.filters.filter(filter => filter.field !== field || !['EQ', 'BT'].includes(filter.operator))
+    if (retained.length + selected.length > 30) { setError('Maksimal 30 pilihan per tabel.'); return }
+    updateSource(sourceIndex, { filters: [...retained, ...selected] })
+    setSelectionDialog(null)
+    setError('')
+  }
+
   function addSource() {
     if (query.sources.length >= 3) return
     const nextIndex = [0, 1, 2].find(index => !query.sources.some(source => source.alias === `T${index + 1}`))!
@@ -755,13 +801,31 @@ function App() {
       const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
       const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
       setBaseData(result)
-      const displayed = await applyPresentation(result, calculatedColumns, activePivot)
+      const prepared = await applyPresentation(result, calculatedColumns, null)
+      const addedRows = query.sources.flatMap(source => source.fields.map(field => `${source.alias}.${field.toUpperCase()}`))
+      const candidateRows = activePivot ? [...activePivot.rows, ...addedRows
+        .filter(column => column !== activePivot.column && column !== activePivot.value && !activePivot.rows.includes(column))] : []
+      const pivot = activePivot && prepared.columns.includes(activePivot.column) && prepared.columns.includes(activePivot.value)
+        ? { ...activePivot, rows: candidateRows.filter(column => prepared.columns.includes(column)) }
+        : null
+      const displayed = pivot?.rows.length
+        ? await applyPresentation(prepared, [], pivot)
+        : prepared
+      if (pivot) {
+        setActivePivot(pivot)
+        setPivotRows(pivot.rows)
+      } else if (activePivot) {
+        setActivePivot(null)
+        setPivotRows([''])
+      }
       setData(displayed)
       setVisibleColumns(current => {
-        const selected = displayed.columns.filter(column => current.includes(column))
+        const selected = [...current.filter(column => displayed.columns.includes(column)),
+          ...displayed.columns.filter(column => data.columns.length > 0 && !data.columns.includes(column) && !current.includes(column))]
         return selected.length ? selected : displayed.columns
       })
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
+        (activePivot && !pivot ? ' · Pivot dilepas karena kolom pengaturannya sudah tidak ada pada query.' : '') +
         (result.warnings?.length ? ` · ${result.warnings.join(' ')}` : ''))
       window.setTimeout(() => {
         queryResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -775,8 +839,12 @@ function App() {
     for (const column of calculations) {
       result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
     }
+    if (!result.rows.length) return result
     if (pivot) {
-      result = await post<GridData>('/data/pivot', { rows: result.rows, index: pivot.rows,
+      const available = new Set(result.columns)
+      const rows = pivot.rows.filter(column => available.has(column))
+      if (!rows.length || !available.has(pivot.column) || !available.has(pivot.value)) return result
+      result = await post<GridData>('/data/pivot', { rows: result.rows, index: rows,
         columns: pivot.column, values: pivot.value, aggregation: pivot.aggregation })
     }
     return result
@@ -786,6 +854,11 @@ function App() {
     const rows = pivotRows.filter(Boolean)
     if (!rows.length || !pivotColumn || !pivotValue || new Set([...rows, pivotColumn, pivotValue]).size !== rows.length + 2) {
       setError('Pilih field Baris, Kolom, dan Nilai yang berbeda.'); return
+    }
+    const unavailable = [...rows, pivotColumn, pivotValue].filter(column => !sourceColumns.includes(column))
+    if (unavailable.length) {
+      setError(`Kolom pivot sudah tidak tersedia: ${unavailable.join(', ')}. Pilih ulang pengaturan pivot.`)
+      return
     }
     setBusy(true); setError('')
     try {
@@ -944,6 +1017,15 @@ function App() {
       }
       if (variant.layout.filterModel) gridRef.current?.api.setFilterModel(variant.layout.filterModel)
     }, 50)
+  }
+
+  function moveVisibleColumn(column: string, target: string) {
+    setVisibleColumns(current => {
+      if (column === target || !current.includes(column) || !current.includes(target)) return current
+      const next = current.filter(item => item !== column)
+      next.splice(next.indexOf(target), 0, column)
+      return next
+    })
   }
 
   async function saveCompareVariant() {
@@ -1155,8 +1237,8 @@ function App() {
 
   const resultDescriptions = useMemo(() => Object.fromEntries(query.sources.flatMap(source => (structureFields[source.alias] || []).map(field => [`${source.alias}.${field.name}`, field.description || '']))), [query.sources, structureFields])
   const sourceColumns = useMemo(() => [...baseData.columns, ...calculatedColumns.map(column => column.name)], [baseData.columns, calculatedColumns])
-  const columns = useMemo<ColDef<Row>[]>(() => data.columns
-    .filter(c => visibleColumns.includes(c))
+  const columns = useMemo<ColDef<Row>[]>(() => visibleColumns
+    .filter(c => data.columns.includes(c))
     .map(c => ({
       field: c,
       headerName: resultDescriptions[c] ? `${c} · ${resultDescriptions[c]}` : c,
@@ -1451,7 +1533,7 @@ function App() {
               }
 
               return <div className="field-selection-table" key={source.alias}><div className="field-selection-title"><strong>{source.table_name}</strong>
-                <span>{source.fields.length} tampil · {source.filters.length} filter</span></div>
+                <span>{source.fields.length} tampil · {new Set(source.filters.map(filter => filter.field)).size} filter</span></div>
                 <input placeholder="Cari kolom…" value={fieldSearch[source.alias] || ''}
                   onChange={e => setFieldSearch(current => ({ ...current, [source.alias]: e.target.value }))} />
                 <div className="field-selection-controls">
@@ -1496,11 +1578,28 @@ function App() {
                   return <div className="field-selection-row" key={field.name}><span title={fieldTitle(field)}>
                     <FieldName field={field} showType />{field.is_key && <KeyRound size={11} className="key-icon" />}</span>
                     <input type="checkbox" aria-label={`Tampilkan ${source.table_name}.${field.name}`}
-                      checked={source.fields.includes(field.name)} onChange={e => updateSource(sourceIndex, {
-                        fields: e.target.checked ? [...source.fields, field.name] : source.fields.filter(name => name !== field.name),
-                      })} />
+                      checked={source.fields.includes(field.name)} onChange={e => {
+                        const column = `${source.alias}.${field.name}`
+                        setVisibleColumns(current => e.target.checked
+                          ? current.includes(column) ? current : [...current, column]
+                          : current.filter(name => name !== column))
+                        if (activePivot && column !== activePivot.column && column !== activePivot.value) {
+                          setActivePivot(current => current ? {
+                            ...current,
+                            rows: e.target.checked
+                              ? current.rows.includes(column) ? current.rows : [...current.rows, column]
+                              : current.rows.filter(name => name !== column),
+                          } : current)
+                          setPivotRows(current => e.target.checked
+                            ? current.includes(column) ? current : [...current, column]
+                            : current.filter(name => name !== column))
+                        }
+                        updateSource(sourceIndex, {
+                          fields: e.target.checked ? [...source.fields, field.name] : source.fields.filter(name => name !== field.name),
+                        })
+                      }} />
                     <input type="checkbox" aria-label={`Filter ${source.table_name}.${field.name}`}
-                      checked={selectedFilter} disabled={!selectedFilter && source.filters.length >= 10}
+                      checked={selectedFilter} disabled={!selectedFilter && new Set(source.filters.map(filter => filter.field)).size >= 10}
                       onChange={e => updateSource(sourceIndex, { filters: e.target.checked
                         ? [...source.filters, { field: field.name, operator: 'EQ', value: '' }]
                         : source.filters.filter(filter => filter.field !== field.name),
@@ -1511,13 +1610,18 @@ function App() {
                     updateSource(sourceIndex, { fields: e.target.value.toUpperCase().split(',').map(value => value.trim()).filter(Boolean) }) }} />}
               </div>
             })}</div>
-            {query.sources.some(source => source.filters.length) && <div className="parameter-panel"><strong>Nilai parameter</strong><small>Parameter kosong tidak membatasi hasil.</small>
-              {query.sources.flatMap((source, sourceIndex) => source.filters.map((filter, filterIndex) =>
-                <div className="parameter-row" key={`${source.alias}-${filter.field}`}><span title={metadataFor(source).find(field => field.name === filter.field)?.description || ''}>{source.table_name}.{filter.field}{metadataFor(source).find(field => field.name === filter.field)?.description && <small className="inline-description">{metadataFor(source).find(field => field.name === filter.field)?.description}</small>}</span>
-                  <select value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}>
-                    {['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
-                  <input placeholder="Nilai filter (opsional)" value={filter.value}
-                    onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })} /></div>))}</div>}
+            {query.sources.some(source => source.filters.length) && <div className="parameter-panel"><strong>Nilai parameter</strong><small>Tambahkan beberapa nilai atau interval. Pilihan pada field yang sama digabung sebagai alternatif; field berbeda harus sama-sama terpenuhi.</small>
+              {query.sources.flatMap((source, sourceIndex) => [...new Set(source.filters.map(filter => filter.field))].map(field =>
+                <div className="parameter-group" key={`${source.alias}-${field}`}><div className="parameter-group-head"><strong>{source.table_name}.{field}</strong><small>{metadataFor(source).find(item => item.name === field)?.description}</small><button className="text-button" onClick={() => openSelectionDialog(sourceIndex, field)}><Columns3 size={14} /> Pilihan ganda</button></div>
+                  {source.filters.map((filter, filterIndex) => filter.field !== field || source.filters.slice(0, filterIndex).filter(item => item.field === field).length >= 2 ? null : <div className="parameter-condition" key={`${field}-${filterIndex}`}>
+                    <select aria-label="Pilihan atau pengecualian" value={filter.sign || 'I'} onChange={e => updateFilter(sourceIndex, filterIndex, { sign: e.target.value as 'I' | 'E' })}><option value="I">Pilih</option><option value="E">Kecualikan</option></select>
+                    <select aria-label="Operator" value={filter.operator} onChange={e => updateFilter(sourceIndex, filterIndex, { operator: e.target.value })}><option value="EQ">Sama dengan</option><option value="BT">Interval</option><option value="NE">Tidak sama</option><option value="GT">Lebih dari</option><option value="GE">≥</option><option value="LT">Kurang dari</option><option value="LE">≤</option></select>
+                    <input aria-label="Nilai awal" placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'} value={filter.value} onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })} />
+                    {filter.operator === 'BT' && <><span className="parameter-range-separator">sampai</span><input aria-label="Nilai akhir" placeholder="Sampai" value={filter.high_value || ''} onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: e.target.value })} /></>}
+                    <button className="icon-button" title="Hapus pilihan" aria-label={`Hapus pilihan ${field}`} onClick={() => updateSource(sourceIndex, { filters: source.filters.filter((_, index) => index !== filterIndex) })}><Trash2 size={14} /></button>
+                  </div>)}
+                  {source.filters.filter(filter => filter.field === field).length > 2 && <small className="parameter-more">+{source.filters.filter(filter => filter.field === field).length - 2} pilihan lain · buka Pilihan ganda untuk melihat semuanya</small>}
+                </div>))}</div>}
           </section>
           <section className="card results-card" ref={queryResultRef}><div className="section-head"><div><span className="icon-tile green"><BarChart3 size={18} /></span><strong>Hasil Laporan</strong><span className="count-pill">{data.rows.length} baris</span></div>
             <div className="results-actions">
@@ -1541,14 +1645,18 @@ function App() {
                 <div className="pivot-area"><strong>Nilai</strong><small>Contoh: nilai karakteristik</small><select value={pivotValue} onChange={e => setPivotValue(e.target.value)}><option value="">Pilih field Nilai</option>{sourceColumns.map(column => <option key={column} value={column}>{column}{resultDescriptions[column] ? ` · ${resultDescriptions[column]}` : ''}</option>)}</select><select value={pivotAgg} onChange={e => setPivotAgg(e.target.value)}><option value="first">Nilai pertama</option><option value="sum">SUM · Jumlah</option><option value="mean">AVERAGE · Rata-rata</option><option value="count">COUNT · Hitung</option><option value="min">MIN · Terkecil</option><option value="max">MAX · Terbesar</option></select></div></div>
               <div className="designer-actions">{activePivot && <button className="button subtle" onClick={async () => { const result = await applyPresentation(baseData, calculatedColumns, null); setActivePivot(null); setData(result); setVisibleColumns(result.columns); setNotice('Tampilan pivot dilepas.') }}>Lihat data asal</button>}<button className="button primary" onClick={runPivot} disabled={!pivotRows.every(Boolean) || !pivotColumn || !pivotValue}>Terapkan Pivot</button><button className="button subtle" onClick={saveReport} disabled={!activePivot || !reportName.trim()} title="Simpan pivot bersama laporan"><Save size={14} /> Simpan ke laporan</button></div></div>}
             {data.columns.length > 0 && <div className="column-picker"><span>{visibleColumns.length} dari {data.columns.length} kolom tampil</span><button className="text-button" onClick={() => setColumnChooserOpen(!columnChooserOpen)}><Columns3 size={14} /> Atur kolom</button></div>}
-            {columnChooserOpen && data.columns.length > 0 && <div className="column-chooser"><div className="column-chooser-head"><input placeholder="Cari kolom…" value={columnChooserSearch} onChange={e => setColumnChooserSearch(e.target.value)} /><button className="text-button" onClick={() => setVisibleColumns(data.columns)}>Tampilkan semua</button></div><div className="column-chooser-list">{data.columns.filter(column => column.toLowerCase().includes(columnChooserSearch.toLowerCase()) || (resultDescriptions[column] || '').toLowerCase().includes(columnChooserSearch.toLowerCase())).map(column => <label key={column} title={[column, resultDescriptions[column]].filter(Boolean).join(' · ')}><input type="checkbox" checked={visibleColumns.includes(column)} onChange={e => setVisibleColumns(current => e.target.checked ? data.columns.filter(item => current.includes(item) || item === column) : current.length > 1 ? current.filter(item => item !== column) : current)} /><strong>{column}</strong>{resultDescriptions[column] && <small>{resultDescriptions[column]}</small>}</label>)}</div></div>}
+            {columnChooserOpen && data.columns.length > 0 && <div className="column-chooser">
+              <div className="column-chooser-head"><input placeholder="Cari kolom…" value={columnChooserSearch} onChange={e => setColumnChooserSearch(e.target.value)} /><div className="column-chooser-actions"><button className="text-button" onClick={() => setVisibleColumns(current => [...current.filter(c => data.columns.includes(c)), ...data.columns.filter(c => !current.includes(c))])}>Tampilkan semua</button><button className="text-button" onClick={() => setVisibleColumns(current => current.filter(c => data.columns.includes(c)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })))}>Urut A–Z</button><button className="text-button" onClick={() => setVisibleColumns(current => data.columns.filter(c => current.includes(c)))}>Urutan awal</button></div></div>
+              <p className="column-chooser-hint">Tarik ikon di samping nama kolom untuk mengatur urutan tabel. Klik judul tabel untuk mengurutkan baris.</p>
+              <div className="column-chooser-list">{[...visibleColumns.filter(column => data.columns.includes(column)), ...data.columns.filter(column => !visibleColumns.includes(column))].filter(column => column.toLowerCase().includes(columnChooserSearch.toLowerCase()) || (resultDescriptions[column] || '').toLowerCase().includes(columnChooserSearch.toLowerCase())).map(column => <div className={`column-chooser-item${draggedColumn === column ? ' is-dragging' : ''}${dropColumn === column ? ' is-drop-target' : ''}`} key={column} title={[column, resultDescriptions[column]].filter(Boolean).join(' · ')} onDragOver={event => { if (draggedColumn && draggedColumn !== column && visibleColumns.includes(column)) { event.preventDefault(); setDropColumn(column) } }} onDragLeave={() => setDropColumn(current => current === column ? null : current)} onDrop={event => { event.preventDefault(); if (draggedColumn) moveVisibleColumn(draggedColumn, column); setDraggedColumn(null); setDropColumn(null) }}><label><input type="checkbox" checked={visibleColumns.includes(column)} onChange={e => setVisibleColumns(current => e.target.checked ? [...current, column] : current.length > 1 ? current.filter(item => item !== column) : current)} /><strong>{column}</strong>{resultDescriptions[column] && <small>{resultDescriptions[column]}</small>}</label>{visibleColumns.includes(column) && <span className="column-drag-handle" draggable title={`Tarik untuk memindahkan ${column}`} aria-label={`Tarik untuk memindahkan ${column}`} onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', column); setDraggedColumn(column) }} onDragEnd={() => { setDraggedColumn(null); setDropColumn(null) }}><GripVertical size={15} /></span>}</div>)}</div>
+            </div>}
             {data.rows.length ? (
               <div className="query-table-wrap">
                 <table className="report-matrix">
                   <thead>
                     <tr>
                       <th className="row-idx">#</th>
-                      {data.columns.filter(c => visibleColumns.includes(c)).map(c => {
+                      {visibleColumns.filter(c => data.columns.includes(c)).map(c => {
                         const isSorted = resultSortCol === c
                         return (
                           <th
@@ -1585,7 +1693,7 @@ function App() {
                       return (
                         <tr key={rowIdx}>
                           <th scope="row" className="row-idx">{absoluteIdx}</th>
-                          {data.columns.filter(c => visibleColumns.includes(c)).map(c => {
+                          {visibleColumns.filter(c => data.columns.includes(c)).map(c => {
                             const val = row[c]
                             const isEmpty = val === null || val === undefined || val === ''
                             return (
@@ -1906,6 +2014,17 @@ function App() {
               : <div className="empty-small">Belum ada riwayat.</div>}</section></>}
       </div>
     </main>
+    {selectionDialog && <div className="modal-backdrop" onClick={() => setSelectionDialog(null)}>
+      <div className="modal-card selection-modal" role="dialog" aria-modal="true" aria-label={`Pilihan ganda ${selectionDialog.field}`} onClick={event => event.stopPropagation()}>
+        <div className="modal-head"><div className="modal-title"><span className="modal-title-icon blue"><Columns3 size={18} /></span><span>Pilihan ganda · {query.sources[selectionDialog.sourceIndex]?.table_name}.{selectionDialog.field}</span></div><button className="icon-button" title="Tutup" onClick={() => setSelectionDialog(null)}><X size={18} /></button></div>
+        <div className="selection-tabs">{([
+          ['include_values', 'Nilai tunggal'], ['include_ranges', 'Interval'],
+          ['exclude_values', 'Kecualikan nilai'], ['exclude_ranges', 'Kecualikan interval'],
+        ] as [SelectionTab, string][]).map(([tab, label]) => <button key={tab} className={selectionDialog.tab === tab ? 'active' : ''} onClick={() => setSelectionDialog(current => current && { ...current, tab })}>{label}<span>{selectionDialog.entries[tab].split(/\r?\n/).filter(line => line.trim()).length}</span></button>)}</div>
+        <div className="selection-modal-body"><p>{selectionDialog.tab.endsWith('ranges') ? 'Satu interval per baris. Pisahkan nilai awal dan akhir dengan Tab, titik koma, atau koma.' : 'Tempel nomor batch dari Excel atau ketik satu nomor per baris. Koma dan Tab juga diterima.'}</p><textarea autoFocus spellCheck={false} placeholder={selectionDialog.tab.endsWith('ranges') ? '0000000001;0000000010\n0000000020;0000000030' : '0000366399\n0000366400\n0000366401'} value={selectionDialog.entries[selectionDialog.tab]} onChange={event => setSelectionDialog(current => current && { ...current, entries: { ...current.entries, [current.tab]: event.target.value } })} /><small>Maksimal 30 pilihan per tabel. Nomor dengan nol di depan tetap sebagai teks.</small></div>
+        <div className="selection-modal-actions"><button className="button subtle" onClick={() => setSelectionDialog(null)}>Batal</button><button className="button primary" onClick={saveSelectionDialog}>Terapkan pilihan</button></div>
+      </div>
+    </div>}
     {catalogModal.open && (
       <div className="modal-backdrop" onClick={() => setCatalogModal(c => ({ ...c, open: false }))}>
         <div className="modal-card catalog-modal" onClick={e => e.stopPropagation()}>
