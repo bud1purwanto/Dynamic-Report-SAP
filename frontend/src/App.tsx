@@ -23,7 +23,14 @@ type Variant = { id: string; name: string; layout: {
   filterModel?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getFilterModel']>
 } }
 type SelectionTab = 'include_values' | 'include_ranges' | 'exclude_values' | 'exclude_ranges'
-type SelectionDialog = { sourceIndex: number; field: string; tab: SelectionTab; entries: Record<SelectionTab, string> }
+type SelectionDialog = {
+  sourceIndex?: number
+  context?: 'query' | 'compare'
+  field: string
+  tableName?: string
+  tab: SelectionTab
+  entries: Record<SelectionTab, string>
+}
 type CompareVariant = {
   id: string
   name: string
@@ -305,6 +312,9 @@ function App() {
   const [compareMetadataLoading, setCompareMetadataLoading] = useState(false)
   const [compareMetadataError, setCompareMetadataError] = useState('')
   const [compareFieldSearch, setCompareFieldSearch] = useState('')
+  const [compareFilterMode, setCompareFilterMode] = useState<'all' | 'selected' | 'keys'>('all')
+  const [compareSortOrder, setCompareSortOrder] = useState<'sap' | 'selected_first' | 'keys_first' | 'az'>('sap')
+  const [compareParameterModalOpen, setCompareParameterModalOpen] = useState(false)
   const [compareRowcount, setCompareRowcount] = useState(100)
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
   const [compareRows, setCompareRows] = useState<CompareRow[]>([])
@@ -658,8 +668,10 @@ function App() {
       i === filterIndex ? { ...filter, ...patch } : filter) })
   }
 
-  function openSelectionDialog(sourceIndex: number, field: string) {
-    const filters = query.sources[sourceIndex].filters.filter(filter => filter.field === field)
+  function openSelectionDialog(sourceIndexOrNull: number | null, field: string, context: 'query' | 'compare' = 'query', tableName?: string) {
+    const filters = context === 'compare'
+      ? compareFilters.filter(filter => filter.field === field)
+      : query.sources[sourceIndexOrNull ?? 0].filters.filter(filter => filter.field === field)
     const entries = {} as Record<SelectionTab, string>
     for (const [tab, sign, operator] of [
       ['include_values', 'I', 'EQ'], ['include_ranges', 'I', 'BT'],
@@ -668,13 +680,21 @@ function App() {
       entries[tab] = filters.filter(filter => (filter.sign || 'I') === sign && filter.operator === operator)
         .map(filter => operator === 'BT' ? `${filter.value}\t${filter.high_value || ''}` : filter.value).join('\n')
     }
-    setSelectionDialog({ sourceIndex, field, tab: 'include_values', entries })
+    setSelectionDialog({
+      sourceIndex: sourceIndexOrNull ?? undefined,
+      context,
+      field,
+      tableName: tableName || (context === 'compare' ? compareTable : query.sources[sourceIndexOrNull ?? 0]?.table_name),
+      tab: 'include_values',
+      entries,
+    })
   }
 
   function saveSelectionDialog() {
     if (!selectionDialog) return
-    const { sourceIndex, field, entries } = selectionDialog
-    const source = query.sources[sourceIndex]
+    const { sourceIndex, field, entries, context } = selectionDialog
+    const isCompare = context === 'compare'
+    const existingFilters = isCompare ? compareFilters : query.sources[sourceIndex ?? 0].filters
     const selected: Source['filters'] = []
     for (const [tab, sign, operator] of [
       ['include_values', 'I', 'EQ'], ['include_ranges', 'I', 'BT'],
@@ -692,9 +712,13 @@ function App() {
         }
       }
     }
-    const retained = source.filters.filter(filter => filter.field !== field || !['EQ', 'BT'].includes(filter.operator))
+    const retained = existingFilters.filter(filter => filter.field !== field || !['EQ', 'BT'].includes(filter.operator))
     if (retained.length + selected.length > 30) { setError('Maksimal 30 pilihan per tabel.'); return }
-    updateSource(sourceIndex, { filters: [...retained, ...selected] })
+    if (isCompare) {
+      setCompareFilters([...retained, ...selected])
+    } else {
+      updateSource(sourceIndex ?? 0, { filters: [...retained, ...selected] })
+    }
     setSelectionDialog(null)
     setError('')
   }
@@ -942,11 +966,26 @@ function App() {
     finally { setBusy(false) }
   }
 
+  function handleRunCompareClick() {
+    if (!compareTarget || !otherTarget || compareTarget === otherTarget) {
+      setError('Pilih dua server SAP yang berbeda.')
+      return
+    }
+    if (!compareTable.trim()) {
+      setError('Isi nama tabel yang akan dibandingkan.')
+      return
+    }
+    if (compareFilters.length > 0) {
+      setCompareParameterModalOpen(true)
+    } else {
+      runCompare()
+    }
+  }
+
   async function runCompare() {
     if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return }
     if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return }
     if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return }
-    if (compareFilters.some(filter => !filter.value.trim())) { setError('Isi nilai untuk setiap parameter yang dipilih.'); return }
     if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return }
     setBusy(true); setError(''); setCompareResult(null); setCompareRows([])
     try {
@@ -1855,7 +1894,21 @@ function App() {
         {tab === 'compare' && <><div className="page-heading"><div><span className="eyebrow">DATA QUALITY</span><h1>Bandingkan Data</h1>
           <p>Temukan perbedaan data tabel yang sama di dua server SAP. Simpan parameter perbandingan sebagai variant untuk digunakan kembali.</p></div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="button primary" onClick={runCompare} disabled={busy || servers.length < 2}><GitCompareArrows size={16} /> Bandingkan</button>
+            {compareFilters.length > 0 && (
+              <button
+                className="button subtle"
+                onClick={() => setCompareParameterModalOpen(true)}
+                title="Atur parameter filter perbandingan"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <SlidersHorizontal size={15} />
+                Parameter Filter
+                <span className="count-pill" style={{ marginLeft: '2px', background: '#e1ecf8', color: '#1d5cb4' }}>
+                  {new Set(compareFilters.map(f => f.field)).size}
+                </span>
+              </button>
+            )}
+            <button className="button primary" onClick={handleRunCompareClick} disabled={busy || servers.length < 2}><GitCompareArrows size={16} /> Bandingkan</button>
           </div></div>
           {servers.length < 2 && <div className="alert error">Perbandingan memerlukan akses ke setidaknya dua server SAP. Periksa izin akun Anda.</div>}
 
@@ -1908,24 +1961,231 @@ function App() {
               </button>
             </div>
           </div>
-          <div className="card compare-card"><div className="compare-target"><label>SERVER SUMBER<select value={compareTarget} onChange={e => { setCompareTarget(e.target.value); setCompareFilters([]) }}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
-            <GitCompareArrows size={22} /><label>SERVER PEMBANDING<select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}><option value="">Pilih server</option>{servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label></div>
-            <div className="compare-options"><label>Tabel<div className="compare-table-picker"><input placeholder="MARA" value={compareTable} onChange={e => { setCompareTable(e.target.value.toUpperCase()); setCompareFilters([]) }} /><button className="button subtle" onClick={() => openTableCatalog(undefined, 'compare')} disabled={!compareTarget} title="Cari di katalog tabel SAP"><BookOpen size={14} /> Katalog</button></div></label>
-              <p>Semua field tabel dibandingkan. Key baris diambil otomatis dari struktur SAP pada kedua server.</p></div>
-            <div className="compare-field-panel"><div className="compare-field-heading"><div><strong>Kolom tabel</strong><small>Pilih kolom untuk dijadikan parameter filter. Semua kolom tetap dibandingkan.</small></div><input placeholder="Cari kolom…" value={compareFieldSearch} onChange={e => setCompareFieldSearch(e.target.value.toUpperCase())} disabled={!compareMetadata.length} /></div>
-              {compareMetadata.length > 0 && !compareMetadata.some(field => field.description) && <span className="metadata-status">Teks deskripsi kolom tidak tersedia dari SAP untuk tabel ini.</span>}
-              {compareMetadataLoading ? <span className="metadata-status">Memuat kolom tabel…</span> : compareMetadataError ? <span className="metadata-status">{compareMetadataError}</span> : compareMetadata.length ? <div className="compare-field-list">{compareMetadata.filter(field => field.name.includes(compareFieldSearch) || field.data_type.toUpperCase().includes(compareFieldSearch)).map(field => {
-                const selected = compareFilters.some(filter => filter.field === field.name)
-                return <label className="compare-field-choice" key={field.name}><input type="checkbox" checked={selected} disabled={!selected && compareFilters.length >= 10} onChange={e => setCompareFilters(current => e.target.checked ? [...current, { field: field.name, operator: 'EQ', value: '' }] : current.filter(filter => filter.field !== field.name))} />
-                  <FieldName field={field} showType />{field.is_key && <KeyRound size={11} className="key-icon" />}</label>
-              })}</div> : <span className="metadata-status">Isi nama tabel untuk melihat kolomnya.</span>}</div>
-            <div className="compare-settings"><label>Batas baris per server<input type="number" min={1} max={1000} value={compareRowcount} onChange={e => setCompareRowcount(Number(e.target.value))} /></label>
-              <div className="compare-filter-panel"><div className="filter-heading"><span>PARAMETER FILTER (BERLAKU UNTUK KEDUA SERVER)</span></div>
-                {compareFilters.map((filter, index) => <div className="filter-row" key={filter.field}><strong title={compareMetadata.find(field => field.name === filter.field)?.description || ''}>{filter.field}{compareMetadata.find(field => field.name === filter.field)?.description && <small className="inline-description">{compareMetadata.find(field => field.name === filter.field)?.description}</small>}</strong>
-                  <select value={filter.operator} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, operator: e.target.value } : item))}>{['EQ', 'NE', 'GT', 'GE', 'LT', 'LE'].map(op => <option key={op}>{op}</option>)}</select>
-                  <input placeholder="Nilai" value={filter.value} onChange={e => setCompareFilters(current => current.map((item, i) => i === index ? { ...item, value: e.target.value } : item))} />
-                  <button className="icon-button" title="Hapus filter" onClick={() => setCompareFilters(current => current.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>)}
-                {!compareFilters.length && <span className="metadata-status">Pilih kolom di atas untuk mengisi parameter.</span>}</div></div></div>
+          <div className="toolbar">
+            <div className="field-group" style={{ minWidth: '220px' }}>
+              <label>SERVER SUMBER</label>
+              <select value={compareTarget} onChange={e => { setCompareTarget(e.target.value); setCompareFilters([]) }}>
+                <option value="">Pilih server sumber</option>
+                {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </div>
+            <div style={{ display: 'grid', placeItems: 'center', height: '40px', padding: '0 4px', color: '#5583dc' }}>
+              <GitCompareArrows size={20} />
+            </div>
+            <div className="field-group" style={{ minWidth: '220px' }}>
+              <label>SERVER PEMBANDING</label>
+              <select value={otherTarget} onChange={e => setOtherTarget(e.target.value)}>
+                <option value="">Pilih server pembanding</option>
+                {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </div>
+            <div className="field-group" style={{ minWidth: '200px' }}>
+              <label>TABEL SAP</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <input
+                  placeholder="Contoh: MARA, MCH1"
+                  value={compareTable}
+                  onChange={e => { setCompareTable(e.target.value.toUpperCase()); setCompareFilters([]) }}
+                />
+                <button
+                  type="button"
+                  className="button subtle"
+                  style={{ height: '40px', padding: '0 10px', fontSize: '11px' }}
+                  onClick={() => openTableCatalog(undefined, 'compare')}
+                  disabled={!compareTarget}
+                  title="Cari di katalog tabel SAP"
+                >
+                  <BookOpen size={14} /> Katalog
+                </button>
+              </div>
+            </div>
+            <div className="field-group narrow">
+              <label>BATAS BARIS</label>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={compareRowcount}
+                onChange={e => setCompareRowcount(Number(e.target.value))}
+              />
+            </div>
+          </div>
+
+          <div className="card field-selection-card" style={{ marginBottom: '18px' }}>
+            <div className="section-head">
+              <div>
+                <span className="icon-tile blue"><Columns3 size={18} /></span>
+                <strong>Kolom Tabel & Parameter Filter Perbandingan</strong>
+                {compareTable && <span className="tiny-pill">{compareTable}</span>}
+              </div>
+              <span className="tiny-pill">Semua kolom dibandingkan · Centang untuk membuat filter</span>
+            </div>
+            <p className="field-selection-intro" style={{ margin: 0, padding: '14px 20px 4px' }}>
+              Centang kolom yang ingin dibatasi nilainya sebelum perbandingan dijalankan. Key baris diambil otomatis dari struktur SAP kedua server.
+            </p>
+            <div style={{ padding: '14px 20px 20px' }}>
+              <div className="field-selection-table" style={{ width: '100%', maxWidth: '100%' }}>
+                <div className="field-selection-title">
+                  <strong>{compareTable || 'Tabel SAP'}</strong>
+                  <span>{compareMetadata.length} kolom · {compareFilters.length} filter aktif</span>
+                </div>
+                <input
+                  placeholder="Cari kolom (nama, deskripsi, atau tipe data)…"
+                  value={compareFieldSearch}
+                  onChange={e => setCompareFieldSearch(e.target.value)}
+                  disabled={!compareMetadata.length}
+                />
+                <div className="field-selection-controls">
+                  <div className="field-filter-pills">
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${compareFilterMode === 'all' ? 'active' : ''}`}
+                      onClick={() => setCompareFilterMode('all')}
+                    >
+                      Semua
+                    </button>
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${compareFilterMode === 'selected' ? 'active' : ''}`}
+                      onClick={() => setCompareFilterMode('selected')}
+                    >
+                      Dipilih ({compareFilters.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`field-filter-pill ${compareFilterMode === 'keys' ? 'active' : ''}`}
+                      onClick={() => setCompareFilterMode('keys')}
+                    >
+                      Key
+                    </button>
+                  </div>
+                  <select
+                    className="field-sort-select"
+                    value={compareSortOrder}
+                    onChange={e => setCompareSortOrder(e.target.value as any)}
+                    title="Urutan kolom"
+                  >
+                    <option value="sap">Urutan SAP</option>
+                    <option value="selected_first">Dipilih Duluan</option>
+                    <option value="keys_first">Key Duluan</option>
+                    <option value="az">A - Z</option>
+                  </select>
+                </div>
+                <div className="field-selection-head">
+                  <span>Kolom</span>
+                  <span style={{ textAlign: 'center' }}>Filter</span>
+                </div>
+                <div className="field-selection-list" style={{ maxHeight: '280px' }}>
+                  {(() => {
+                    const term = compareFieldSearch.trim().toUpperCase()
+                    let fields = compareMetadata.filter(field => {
+                      const desc = (field.description || '').toUpperCase()
+                      return !term || field.name.includes(term) || desc.includes(term) || field.data_type.toUpperCase().includes(term)
+                    })
+                    if (compareFilterMode === 'selected') {
+                      fields = fields.filter(f => compareFilters.some(flt => flt.field === f.name))
+                    } else if (compareFilterMode === 'keys') {
+                      fields = fields.filter(f => f.is_key)
+                    }
+
+                    if (compareSortOrder === 'az') {
+                      fields = [...fields].sort((a, b) => a.name.localeCompare(b.name))
+                    } else if (compareSortOrder === 'selected_first') {
+                      fields = [...fields].sort((a, b) => {
+                        const aSel = compareFilters.some(flt => flt.field === a.name) ? 0 : 1
+                        const bSel = compareFilters.some(flt => flt.field === b.name) ? 0 : 1
+                        if (aSel !== bSel) return aSel - bSel
+                        return compareMetadata.indexOf(a) - compareMetadata.indexOf(b)
+                      })
+                    } else if (compareSortOrder === 'keys_first') {
+                      fields = [...fields].sort((a, b) => {
+                        const aKey = a.is_key ? 0 : 1
+                        const bKey = b.is_key ? 0 : 1
+                        if (aKey !== bKey) return aKey - bKey
+                        return compareMetadata.indexOf(a) - compareMetadata.indexOf(b)
+                      })
+                    }
+
+                    if (compareMetadataLoading) {
+                      return <div className="catalog-loading">Memuat kolom tabel SAP…</div>
+                    }
+                    if (compareMetadataError) {
+                      return <div className="alert error" style={{ margin: '10px' }}>{compareMetadataError}</div>
+                    }
+                    if (!compareTable) {
+                      return <div className="empty-small">Pilih tabel SAP untuk melihat kolomnya.</div>
+                    }
+                    if (!fields.length) {
+                      return <div className="empty-small">{compareMetadata.length ? 'Tidak ada kolom cocok.' : 'Struktur tabel belum tersedia.'}</div>
+                    }
+
+                    return fields.map(field => {
+                      const selected = compareFilters.some(filter => filter.field === field.name)
+                      return (
+                        <div
+                          className="field-selection-row"
+                          key={field.name}
+                          style={{ gridTemplateColumns: 'minmax(0, 1fr) 52px' }}
+                        >
+                          <span title={fieldTitle(field)}>
+                            <FieldName field={field} showType />
+                            {field.is_key && <KeyRound size={11} className="key-icon" />}
+                          </span>
+                          <input
+                            type="checkbox"
+                            aria-label={`Filter ${compareTable}.${field.name}`}
+                            checked={selected}
+                            disabled={!selected && compareFilters.length >= 10}
+                            onChange={e => setCompareFilters(current => e.target.checked
+                              ? [...current, { field: field.name, operator: 'EQ', value: '' }]
+                              : current.filter(filter => filter.field !== field.name)
+                            )}
+                          />
+                        </div>
+                      )
+                    })
+                  })()}
+                </div>
+              </div>
+
+              {compareFilters.length > 0 && (
+                <div style={{
+                  marginTop: '16px',
+                  padding: '12px 16px',
+                  background: '#f4f8fd',
+                  border: '1px solid #d4e3f5',
+                  borderRadius: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  flexWrap: 'wrap',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span className="icon-tile purple" style={{ width: '32px', height: '32px', borderRadius: '6px' }}>
+                      <SlidersHorizontal size={16} />
+                    </span>
+                    <div>
+                      <strong style={{ fontSize: '12px', color: '#1e3d64', display: 'block' }}>
+                        {new Set(compareFilters.map(f => f.field)).size} Parameter Filter Perbandingan Aktif
+                      </strong>
+                      <span style={{ fontSize: '11px', color: '#627c9d' }}>
+                        Nilai parameter berlaku identik untuk server sumber dan pembanding, dan dapat diatur via popup.
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="button subtle"
+                    style={{ background: '#fff', fontSize: '11px', height: '32px' }}
+                    onClick={() => setCompareParameterModalOpen(true)}
+                  >
+                    <SlidersHorizontal size={14} /> Atur Nilai Parameter
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
           <div className="card changes-card" ref={compareResultRef}>
             <div className="section-head">
               <div>
@@ -2104,7 +2364,13 @@ function App() {
     </main>
     {selectionDialog && <div className="modal-backdrop" onClick={() => setSelectionDialog(null)}>
       <div className="modal-card selection-modal" role="dialog" aria-modal="true" aria-label={`Pilihan ganda ${selectionDialog.field}`} onClick={event => event.stopPropagation()}>
-        <div className="modal-head"><div className="modal-title"><span className="modal-title-icon blue"><Columns3 size={18} /></span><span>Pilihan ganda · {query.sources[selectionDialog.sourceIndex]?.table_name}.{selectionDialog.field}</span></div><button className="icon-button" title="Tutup" onClick={() => setSelectionDialog(null)}><X size={18} /></button></div>
+        <div className="modal-head">
+          <div className="modal-title">
+            <span className="modal-title-icon blue"><Columns3 size={18} /></span>
+            <span>Pilihan ganda · {selectionDialog.tableName || (selectionDialog.sourceIndex !== undefined ? query.sources[selectionDialog.sourceIndex]?.table_name : '')}.{selectionDialog.field}</span>
+          </div>
+          <button className="icon-button" title="Tutup" onClick={() => setSelectionDialog(null)}><X size={18} /></button>
+        </div>
         <div className="selection-tabs">{([
           ['include_values', 'Nilai tunggal'], ['include_ranges', 'Interval'],
           ['exclude_values', 'Kecualikan nilai'], ['exclude_ranges', 'Kecualikan interval'],
@@ -2772,6 +3038,123 @@ function App() {
                 }}
               >
                 <Play size={14} fill="currentColor" /> {busy ? 'Memproses…' : 'Jalankan Query'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    {compareParameterModalOpen && (
+      <div className="modal-backdrop" onClick={() => setCompareParameterModalOpen(false)}>
+        <div className="modal-card parameter-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon purple"><SlidersHorizontal size={18} /></span>
+              <span>Parameter Filter Perbandingan · {compareTable}</span>
+            </div>
+            <button className="icon-button" title="Tutup" onClick={() => setCompareParameterModalOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <div className="parameter-modal-body">
+            <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
+              Tentukan nilai atau interval kriteria filter untuk perbandingan. Filter ini berlaku secara identik untuk server sumber ({servers.find(s => s.id === compareTarget)?.label || compareTarget}) dan server pembanding ({servers.find(s => s.id === otherTarget)?.label || otherTarget}).
+            </small>
+            {[...new Set(compareFilters.map(filter => filter.field))].map(field => {
+              const meta = compareMetadata.find(item => item.name === field)
+              return (
+                <div className="parameter-group" key={`compare-${field}`}>
+                  <div className="parameter-group-head">
+                    <strong>{compareTable}.{field}</strong>
+                    {meta?.description && <small>{meta.description}</small>}
+                    <button className="text-button" onClick={() => openSelectionDialog(null, field, 'compare', compareTable)}>
+                      <Columns3 size={14} /> Pilihan ganda
+                    </button>
+                  </div>
+                  {compareFilters.map((filter, filterIndex) => filter.field !== field || compareFilters.slice(0, filterIndex).filter(item => item.field === field).length >= 2 ? null : (
+                    <div className="parameter-condition" key={`${field}-${filterIndex}`}>
+                      <select
+                        aria-label="Pilihan atau pengecualian"
+                        value={filter.sign || 'I'}
+                        onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, sign: e.target.value as 'I' | 'E' } : item))}
+                      >
+                        <option value="I">Pilih</option>
+                        <option value="E">Kecualikan</option>
+                      </select>
+                      <select
+                        aria-label="Operator"
+                        value={filter.operator}
+                        onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, operator: e.target.value } : item))}
+                      >
+                        <option value="EQ">Sama dengan</option>
+                        <option value="BT">Interval</option>
+                        <option value="NE">Tidak sama</option>
+                        <option value="GT">Lebih dari</option>
+                        <option value="GE">≥</option>
+                        <option value="LT">Kurang dari</option>
+                        <option value="LE">≤</option>
+                      </select>
+                      <input
+                        aria-label="Nilai awal"
+                        placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
+                        value={filter.value}
+                        onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, value: e.target.value } : item))}
+                      />
+                      {filter.operator === 'BT' && (
+                        <>
+                          <span className="parameter-range-separator">sampai</span>
+                          <input
+                            aria-label="Nilai akhir"
+                            placeholder="Sampai"
+                            value={filter.high_value || ''}
+                            onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, high_value: e.target.value } : item))}
+                          />
+                        </>
+                      )}
+                      <button
+                        className="icon-button"
+                        title="Hapus pilihan"
+                        aria-label={`Hapus pilihan ${field}`}
+                        onClick={() => setCompareFilters(current => current.filter((_, i) => i !== filterIndex))}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  {compareFilters.filter(filter => filter.field === field).length > 2 && (
+                    <small className="parameter-more">
+                      +{compareFilters.filter(filter => filter.field === field).length - 2} pilihan lain · buka Pilihan ganda untuk melihat semuanya
+                    </small>
+                  )}
+                </div>
+              )
+            })}
+            {compareFilters.length === 0 && (
+              <div className="empty-small" style={{ textAlign: 'center', color: '#889cb5' }}>
+                Belum ada parameter filter yang dipilih dari daftar kolom tabel.
+              </div>
+            )}
+          </div>
+          <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+            <button className="button subtle" onClick={() => setCompareParameterModalOpen(false)}>
+              Batal
+            </button>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                className="button subtle"
+                onClick={() => setCompareParameterModalOpen(false)}
+              >
+                Tutup & Simpan Nilai
+              </button>
+              <button
+                className="button primary"
+                disabled={busy || servers.length < 2 || !compareTarget || !otherTarget || !compareTable}
+                onClick={() => {
+                  setCompareParameterModalOpen(false)
+                  runCompare()
+                }}
+              >
+                <GitCompareArrows size={14} /> {busy ? 'Memproses…' : 'Bandingkan Sekarang'}
               </button>
             </div>
           </div>
