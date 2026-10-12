@@ -811,27 +811,27 @@ function App() {
       const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
       setBaseData(result)
       const prepared = await applyPresentation(result, calculatedColumns, null)
-      const addedRows = query.sources.flatMap(source => source.fields.map(field => `${source.alias}.${field.toUpperCase()}`))
-      const candidateRows = activePivot ? [...activePivot.rows, ...addedRows
-        .filter(column => column !== activePivot.column && column !== activePivot.value && !activePivot.rows.includes(column))] : []
       const pivot = activePivot && prepared.columns.includes(activePivot.column) && prepared.columns.includes(activePivot.value)
-        ? { ...activePivot, rows: candidateRows.filter(column => prepared.columns.includes(column)) }
+        ? {
+            ...activePivot,
+            rows: activePivot.rows.filter(column => prepared.columns.includes(column)),
+          }
         : null
       const displayed = pivot?.rows.length
         ? await applyPresentation(prepared, [], pivot)
         : prepared
-      if (pivot) {
+      if (pivot && pivot.rows.length) {
         setActivePivot(pivot)
         setPivotRows(pivot.rows)
-      } else if (activePivot) {
+      } else if (activePivot && !pivot) {
         setActivePivot(null)
         setPivotRows([''])
       }
       setData(displayed)
       setVisibleColumns(current => {
-        const selected = [...current.filter(column => displayed.columns.includes(column)),
-          ...displayed.columns.filter(column => data.columns.length > 0 && !data.columns.includes(column) && !current.includes(column))]
-        return selected.length ? selected : displayed.columns
+        // If report has saved visibleColumns matching displayed columns, keep them; otherwise display all displayed columns
+        const savedMatches = current.filter(column => displayed.columns.includes(column))
+        return savedMatches.length > 0 ? savedMatches : displayed.columns
       })
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
         (activePivot && !pivot ? ' · Pivot dilepas karena kolom pengaturannya sudah tidak ada pada query.' : '') +
