@@ -126,7 +126,7 @@ class ReadIn(BaseModel):
     table_name: str
     fields: list[str] = Field(min_length=1, max_length=100)
     filters: list[FilterIn] = Field(default_factory=list, max_length=30)
-    rowcount: int = Field(default=100, ge=1, le=1000)
+    rowcount: int = Field(default=100, ge=1, le=50000)
 
 
 class StructureIn(BaseModel):
@@ -166,7 +166,7 @@ class CompareIn(BaseModel):
     other_target: str = Field(min_length=1)
     table_name: str
     filters: list[FilterIn] = Field(default_factory=list, max_length=10)
-    rowcount: int = Field(default=100, ge=1, le=1000)
+    rowcount: int = Field(default=100, ge=1, le=50000)
 
 
 class SourceIn(BaseModel):
@@ -194,7 +194,7 @@ class QueryIn(BaseModel):
     target: str
     sources: list[SourceIn] = Field(min_length=1, max_length=3)
     joins: list[JoinIn] = []
-    rowcount: int = Field(default=100, ge=1, le=1000)
+    rowcount: int = Field(default=100, ge=1, le=50000)
     report_id: str | None = None
 
 
@@ -617,7 +617,7 @@ def build_sap_where(filters: list[FilterIn]) -> list[str]:
             if len(values) == 1:
                 selections["I"].insert(0, f"{field} = '{values[0]}'")
             else:
-                value_list = ",".join("'" + value + "'" for value in values)
+                value_list = ", ".join("'" + value + "'" for value in values)
                 selections["I"].insert(0, f"{field} IN ({value_list})")
         if selections["I"]:
             clauses.append(selections["I"][0] if len(selections["I"]) == 1
@@ -1029,16 +1029,15 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                     for cond in conditions:
                         left_col = f"{join.left_alias}.{cond.left_field.upper()}"
                         right_col = cond.right_field.upper()
-                        upstream_source = next((s for s in dto.sources if s.alias == join.left_alias), None)
-                        has_upstream_filter = bool(upstream_source and any(f.value.strip() for f in upstream_source.filters))
-                        if has_upstream_filter and not any(f.field.upper() == right_col for f in source_filters) and left_col in left_df.columns:
+                        has_upstream_data = len(left_df) > 0
+                        if has_upstream_data and not any(f.field.upper() == right_col for f in source_filters) and left_col in left_df.columns:
                             distinct_vals = [
                                 str(v).strip() for v in left_df[left_col].dropna().unique()
                                 if str(v).strip() and str(v).strip() != "0"
                             ]
                             if len(distinct_vals) == 1:
                                 source_filters.append(FilterIn(field=right_col, operator="EQ", value=distinct_vals[0]))
-                            elif len(distinct_vals) <= 30 - len(source_filters):
+                            elif 1 < len(distinct_vals) <= 30 - len(source_filters):
                                 source_filters.extend(
                                     FilterIn(field=right_col, operator="EQ", value=value)
                                     for value in distinct_vals

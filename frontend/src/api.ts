@@ -6,7 +6,15 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || `Permintaan gagal (HTTP ${res.status})`)
+    let detail = body.detail || `Permintaan gagal (HTTP ${res.status})`
+    if (typeof detail === 'object' && detail !== null) {
+      if (Array.isArray(detail)) {
+        detail = detail.map((d: any) => d.msg || JSON.stringify(d)).join(', ')
+      } else {
+        detail = detail.msg || JSON.stringify(detail)
+      }
+    }
+    throw new Error(String(detail))
   }
   return res.json() as Promise<T>
 }
