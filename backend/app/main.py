@@ -248,20 +248,31 @@ def fail_upstream(res: httpx.Response, service: str) -> None:
     if res.status_code in (401, 403):
         raise HTTPException(401, f"Sesi atau izin {service} tidak valid.")
     if res.status_code >= 400:
-        raise HTTPException(502, f"{service} gagal (HTTP {res.status_code}).")
+        detail = ""
+        try:
+            body = res.json()
+            if isinstance(body, dict):
+                detail = str(body.get("message") or body.get("error") or body.get("detail") or "")
+        except Exception:
+            detail = res.text[:300]
+        msg = f"{service} gagal (HTTP {res.status_code}): {detail}" if detail else f"{service} gagal (HTTP {res.status_code})."
+        raise HTTPException(502, msg)
 
 
 def friendly_sap_error(message: str, target: str) -> str:
     lower = message.lower()
+    prefix = ""
     if any(x in lower for x in ("rfc_logon_failure", "rc: 103", "password logon")):
-        return f"Logon SAP {target} gagal. Perbarui username atau password SAP Anda."
-    if "account locked" in lower or "user locked" in lower:
-        return f"Akun SAP Anda pada {target} terkunci. Hubungi tim Basis."
-    if "s_rfc" in lower or "no rfc authorization" in lower:
-        return f"Akun SAP Anda tidak memiliki izin untuk operasi ini pada {target}."
-    if any(x in lower for x in ("econnrefused", "connect to sap gateway failed", "timeout")):
-        return f"Koneksi ke SAP {target} sedang gagal."
-    return f"Gateway SAP gagal: {message[:300]}"
+        prefix = f"Logon SAP {target} gagal. "
+    elif "account locked" in lower or "user locked" in lower:
+        prefix = f"Akun SAP Anda pada {target} terkunci. "
+    elif "s_rfc" in lower or "no rfc authorization" in lower:
+        prefix = f"Akun SAP Anda tidak memiliki izin untuk operasi ini pada {target}. "
+    elif any(x in lower for x in ("econnrefused", "connect to sap gateway failed", "timeout")):
+        prefix = f"Koneksi ke SAP {target} sedang gagal. "
+    if prefix:
+        return f"{prefix}[Error Asli: {message}]"
+    return f"MCP Gateway SAP ({target}) gagal: {message}"
 
 
 async def get_token(request: Request, db: Session = Depends(get_db)) -> tuple[AppSession, str]:
@@ -398,16 +409,20 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict) -> Any:
                     "Accept": "application/json",
                 },
             )
-        fail_upstream(res, "MCP Gateway")
+        fail_upstream(res, f"MCP Gateway [{target}]")
         data = res.json()
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(502, f"MCP Gateway untuk {target} tidak dapat dihubungi.") from None
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as err:
+        raise HTTPException(502, f"MCP Gateway untuk {target} tidak dapat dihubungi: {err}") from None
     if data.get("error"):
-        raise HTTPException(502, friendly_sap_error(str(data["error"].get("message", data["error"])), target))
+        err_msg = str(data["error"].get("message") or data["error"])
+        raise HTTPException(502, friendly_sap_error(err_msg, target))
     result = data.get("result", {})
     if result.get("isError"):
         messages = [str(c.get("text", "")) for c in result.get("content", [])]
-        raise HTTPException(502, friendly_sap_error(" ".join(messages), target))
+        raw_msg = " ".join(messages) if messages else "Eksekusi tool pada MCP Gateway menghasilkan isError=true"
+        raise HTTPException(502, friendly_sap_error(raw_msg, target))
     return result
 
 

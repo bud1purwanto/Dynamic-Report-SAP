@@ -14,6 +14,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         detail = detail.msg || JSON.stringify(detail)
       }
     }
+    if (res.status === 401 && path !== '/auth/login' && path !== '/auth/me') {
+      window.dispatchEvent(new CustomEvent('lumina:unauthorized', { detail: String(detail) }))
+    }
     throw new Error(String(detail))
   }
   return res.json() as Promise<T>

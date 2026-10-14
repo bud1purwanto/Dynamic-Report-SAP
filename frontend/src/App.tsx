@@ -725,10 +725,21 @@ function App() {
   }
 
   useEffect(() => {
+    function handleUnauthorized(e: Event) {
+      const customEvent = e as CustomEvent<string>
+      setUser(null)
+      setReports([])
+      resetWorkspace(false)
+      setError(customEvent.detail || 'Sesi telah kedaluwarsa atau tidak valid. Silakan login kembali.')
+    }
+    window.addEventListener('lumina:unauthorized', handleUnauthorized)
+
     api<{ user: User }>('/auth/me')
       .then(r => { setUser(r.user); return loadWorkspace() })
       .catch(() => {})
       .finally(() => setLoading(false))
+
+    return () => window.removeEventListener('lumina:unauthorized', handleUnauthorized)
   }, [])
 
   const structureSignature = query.sources.map(source => `${source.alias}:${source.table_name}`).join('|')
