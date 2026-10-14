@@ -1089,6 +1089,8 @@ function App() {
       joins: query.joins,
       calculatedColumns,
       pivot: activePivot,
+      available_columns: data.columns.length ? data.columns : (baseData.columns.length ? baseData.columns : []),
+      column_descriptions: resultDescriptions,
     }
 
     const progressStages = aiContextMode === 'builder' ? [
@@ -1219,10 +1221,34 @@ function App() {
       setQuery(updatedQuery)
       setCalculatedColumns(newCalcs)
       if (newPivot) setActivePivot(newPivot)
+      const targetPivot = newPivot !== null ? newPivot : activePivot
       if (Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0) {
         setVisibleColumns(aiData.visibleColumns)
       } else {
         setVisibleColumns([])
+      }
+      if (baseData.rows.length > 0) {
+        applyPresentation(baseData, newCalcs, targetPivot).then(res => {
+          setData(res)
+          const calcNames = newCalcs.map(c => c.name)
+          const nextVis = Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0
+            ? aiData.visibleColumns
+            : (visibleColumns.length > 0 ? Array.from(new Set([...visibleColumns.filter(c => res.columns.includes(c)), ...calcNames])) : res.columns)
+          setVisibleColumns(nextVis)
+        }).catch(() => {})
+      }
+      if (activeReport && activeSharedPermission !== 'view') {
+        const definition: ReportDefinition = {
+          ...updatedQuery,
+          presentation: {
+            pivot: targetPivot,
+            calculatedColumns: newCalcs,
+            visibleColumns: Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0 ? aiData.visibleColumns : visibleColumns,
+          },
+        }
+        api(`/reports/${encodeURIComponent(activeReport)}`, {
+          method: 'PUT', body: JSON.stringify({ name: reportName, definition }),
+        }).catch(() => {})
       }
       setAiModalOpen(false)
 
@@ -1544,16 +1570,14 @@ function App() {
       const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
       const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
       setBaseData(result)
-      const prepared = await applyPresentation(result, calculatedColumns, null)
-      const pivot = activePivot && prepared.columns.includes(activePivot.column) && prepared.columns.includes(activePivot.value)
+      const availableForPivot = [...result.columns, ...calculatedColumns.map(c => c.name)]
+      const pivot = activePivot && availableForPivot.includes(activePivot.column) && availableForPivot.includes(activePivot.value)
         ? {
             ...activePivot,
-            rows: activePivot.rows.filter(column => prepared.columns.includes(column)),
+            rows: activePivot.rows.filter(column => availableForPivot.includes(column)),
           }
         : null
-      const displayed = pivot?.rows.length
-        ? await applyPresentation(prepared, [], pivot)
-        : prepared
+      const displayed = await applyPresentation(result, calculatedColumns, pivot)
       if (pivot && pivot.rows.length) {
         setActivePivot(pivot)
         setPivotRows(pivot.rows)
@@ -1565,9 +1589,11 @@ function App() {
       }
       setData(displayed)
       setVisibleColumns(current => {
-        // If report has saved visibleColumns matching displayed columns, keep them; otherwise display all displayed columns
+        const calcNames = calculatedColumns.map(c => c.name)
+        if (current.length === 0) return displayed.columns
         const savedMatches = current.filter(column => displayed.columns.includes(column))
-        return savedMatches.length > 0 ? savedMatches : displayed.columns
+        const newCalcs = calcNames.filter(name => displayed.columns.includes(name) && !savedMatches.includes(name))
+        return savedMatches.length > 0 ? [...savedMatches, ...newCalcs] : displayed.columns
       })
       setNotice(`${result.rows.length.toLocaleString('id-ID')} baris berhasil dimuat` +
         (activePivot && !pivot ? ' · Pivot dilepas karena kolom pengaturannya sudah tidak ada pada query.' : '') +
@@ -1587,15 +1613,42 @@ function App() {
     let result = raw
     if (!result.rows.length) return result
 
+    function resolveCol(colName: string, availableCols: string[]): string | null {
+      if (availableCols.includes(colName)) return colName
+      const upper = colName.toUpperCase()
+      const ci = availableCols.find(c => c.toUpperCase() === upper)
+      if (ci) return ci
+      const aliasMatch = availableCols.find(c => c.split('.').pop()?.toUpperCase() === upper || colName.split('.').pop()?.toUpperCase() === c.toUpperCase())
+      if (aliasMatch) return aliasMatch
+      const sub = availableCols.filter(c => c.toUpperCase().includes(upper))
+      if (sub.length === 1) return sub[0]
+      const revSub = availableCols.filter(c => upper.includes(c.toUpperCase()))
+      if (revSub.length === 1) return revSub[0]
+      return null
+    }
+
     // 1. Run calculations on pre-pivot columns first
     const remainingCalcs: CalculatedColumn[] = []
     for (const column of calculations) {
-      const available = new Set(result.columns)
-      const reqCols = column.expression
+      const rawReq = column.expression
         ? (column.expression.match(/\[([^\]]+)\]/g)?.map(m => m.slice(1, -1)) || [])
         : (column.fields || [])
-      if (reqCols.every(f => available.has(f))) {
-        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
+      const resolvedCols = rawReq.map(f => resolveCol(f, result.columns))
+      if (resolvedCols.length > 0 && resolvedCols.every((f): f is string => f !== null)) {
+        let colPayload = { ...column }
+        if (column.expression) {
+          let newExpr = column.expression
+          rawReq.forEach((oldCol, idx) => {
+            const newCol = resolvedCols[idx]
+            if (newCol && oldCol !== newCol) {
+              newExpr = newExpr.split(`[${oldCol}]`).join(`[${newCol}]`)
+            }
+          })
+          colPayload.expression = newExpr
+        } else if (column.fields) {
+          colPayload.fields = resolvedCols as string[]
+        }
+        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...colPayload })
       } else {
         remainingCalcs.push(column)
       }
@@ -1619,12 +1672,25 @@ function App() {
 
     // 3. Run remaining calculations on post-pivot columns
     for (const column of remainingCalcs) {
-      const available = new Set(result.columns)
-      const reqCols = column.expression
+      const rawReq = column.expression
         ? (column.expression.match(/\[([^\]]+)\]/g)?.map(m => m.slice(1, -1)) || [])
         : (column.fields || [])
-      if (reqCols.every(f => available.has(f))) {
-        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...column })
+      const resolvedCols = rawReq.map(f => resolveCol(f, result.columns))
+      if (resolvedCols.length > 0 && resolvedCols.every((f): f is string => f !== null)) {
+        let colPayload = { ...column }
+        if (column.expression) {
+          let newExpr = column.expression
+          rawReq.forEach((oldCol, idx) => {
+            const newCol = resolvedCols[idx]
+            if (newCol && oldCol !== newCol) {
+              newExpr = newExpr.split(`[${oldCol}]`).join(`[${newCol}]`)
+            }
+          })
+          colPayload.expression = newExpr
+        } else if (column.fields) {
+          colPayload.fields = resolvedCols as string[]
+        }
+        result = await post<GridData>('/data/calculated-column', { rows: result.rows, ...colPayload })
       }
     }
 
@@ -1655,6 +1721,21 @@ function App() {
       const result = await applyPresentation(baseData, calculatedColumns, config)
       setActivePivot(config)
       setData(result); setVisibleColumns(result.columns); setPivotOpen(false)
+      if (activeReport && activeSharedPermission !== 'view') {
+        const definition: ReportDefinition = {
+          ...query,
+          presentation: {
+            pivot: config,
+            calculatedColumns,
+            visibleColumns: result.columns,
+          },
+        }
+        api(`/reports/${encodeURIComponent(activeReport)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: reportName, definition }),
+        }).catch(() => {})
+        setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
+      }
       setNotice('Data berhasil di-pivot.')
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
@@ -1697,9 +1778,30 @@ function App() {
       const result = await applyPresentation(baseData, updated, activePivot)
       setCalculatedColumns(updated)
       setData(result)
-      setVisibleColumns(result.columns)
+      let nextVisible = visibleColumns.filter(c => c !== target.name)
+      if (result.columns.length > 0) {
+        nextVisible = visibleColumns.length > 0
+          ? visibleColumns.filter(c => result.columns.includes(c) && c !== target.name)
+          : result.columns
+      }
+      setVisibleColumns(nextVisible)
       if (editingFormulaIndex === index) {
         openFormulaModal(null)
+      }
+      if (activeReport && activeSharedPermission !== 'view') {
+        const definition: ReportDefinition = {
+          ...query,
+          presentation: {
+            pivot: activePivot,
+            calculatedColumns: updated,
+            visibleColumns: nextVisible,
+          },
+        }
+        api(`/reports/${encodeURIComponent(activeReport)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: reportName, definition }),
+        }).catch(() => {})
+        setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
       }
       setNotice(`Kolom hitung "${target.name}" berhasil dihapus.`)
     } catch (e) { setError(message(e)) }
@@ -1754,7 +1856,31 @@ function App() {
       }
       const result = await applyPresentation(baseData, updated, activePivot)
       setCalculatedColumns(updated)
-      setData(result); setVisibleColumns(result.columns)
+      setData(result)
+      let nextVisible = visibleColumns
+      if (result.columns.length > 0) {
+        nextVisible = visibleColumns.length > 0
+          ? Array.from(new Set([...visibleColumns.filter(c => result.columns.includes(c)), name]))
+          : result.columns
+      } else if (visibleColumns.length > 0 && !visibleColumns.includes(name)) {
+        nextVisible = [...visibleColumns, name]
+      }
+      setVisibleColumns(nextVisible)
+      if (activeReport && activeSharedPermission !== 'view') {
+        const definition: ReportDefinition = {
+          ...query,
+          presentation: {
+            pivot: activePivot,
+            calculatedColumns: updated,
+            visibleColumns: nextVisible,
+          },
+        }
+        api(`/reports/${encodeURIComponent(activeReport)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: reportName, definition }),
+        }).catch(() => {})
+        setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
+      }
       setFormulaOpen(false)
       setFormulaName('')
       setFormulaExpression('')
@@ -4250,6 +4376,21 @@ function App() {
                     setActivePivot(null)
                     setData(result)
                     setVisibleColumns(result.columns)
+                    if (activeReport && activeSharedPermission !== 'view') {
+                      const definition: ReportDefinition = {
+                        ...query,
+                        presentation: {
+                          pivot: null,
+                          calculatedColumns,
+                          visibleColumns: result.columns,
+                        },
+                      }
+                      api(`/reports/${encodeURIComponent(activeReport)}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ name: reportName, definition }),
+                      }).catch(() => {})
+                      setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
+                    }
                     setPivotOpen(false)
                     setNotice('Tampilan pivot dilepas.')
                   }}
@@ -4385,7 +4526,24 @@ function App() {
             <span style={{ fontSize: '11px', color: '#687b92', alignSelf: 'center', marginRight: 'auto' }}>
               {visibleColumns.length} dari {data.columns.length} kolom tampil
             </span>
-            <button className="button primary" onClick={() => setColumnChooserOpen(false)}>Selesai</button>
+            <button className="button primary" onClick={() => {
+              setColumnChooserOpen(false)
+              if (activeReport && activeSharedPermission !== 'view') {
+                const definition: ReportDefinition = {
+                  ...query,
+                  presentation: {
+                    pivot: activePivot,
+                    calculatedColumns,
+                    visibleColumns,
+                  },
+                }
+                api(`/reports/${encodeURIComponent(activeReport)}`, {
+                  method: 'PUT',
+                  body: JSON.stringify({ name: reportName, definition }),
+                }).catch(() => {})
+                setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
+              }
+            }}>Selesai</button>
           </div>
         </div>
       </div>

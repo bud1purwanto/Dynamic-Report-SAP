@@ -1303,6 +1303,13 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             "6. Jika ada join antara T1 dan T2, conditions HARUS menghubungkan field key yang tepat (misal MATNR ke MATNR, VBELN ke VBELN, AUFNR ke AUFNR).\n"
             "7. Kolom expression pada calculatedColumns harus menggunakan tanda kurung siku [ALIAS.FIELD] atau [KOLOM].\n"
             "8. Nilai target harus dari daftar allowed_servers.\n"
+            "9. Pemilihan & Pencocokan Kolom Hitung (calculatedColumns):\n"
+            "   a. Periksa daftar 'available_columns' (dan 'column_descriptions') pada current_state.\n"
+            "   b. PILIH DAN GUNAKAN HANYA kolom-kolom yang benar-benar relevan dengan rumus yang diminta pengguna. Contoh: jika pengguna minta hitung 'berat aktual', telusuri available_columns dan pilih kolom yang relevan seperti 'Panjang Film (Meter)', 'Lebar Film (Milimeter)', 'Grammage'.\n"
+            "   c. Beri nama kolom hasil kalkulasi yang relevan, jelas, dan deskriptif (misal 'BERAT AKTUAL', 'TOTAL BIAYA', 'SELISIH QTY').\n"
+            "   d. Tuliskan nama kolom sumber di dalam tanda kurung siku [Nama Kolom Riil] PERSIS sama seperti nama di available_columns (contoh: gunakan [Panjang Film (Meter)], JANGAN disingkat menjadi [Panjang]).\n"
+            "   e. Jika kolom yang dibutuhkan belum ada di tabel atau query saat ini, tambahkan field SAP yang relevan tersebut ke dalam sources dan joins terlebih dahulu agar datanya tersedia.\n"
+            "10. Pemilihan Kolom Tampil (fields & visibleColumns): Hanya sertakan field-field SAP dan kolom yang relevan dengan kebutuhan pelaporan pengguna agar tabel rapi, tidak memuat kolom yang tidak diperlukan.\n"
         )
         user_prompt = json.dumps({
             "request": dto.prompt,
@@ -1331,6 +1338,22 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise HTTPException(502, f"Respons AI dari {provider_used} bukan JSON valid: {exc}\nIsi:\n{cleaned[:300]}") from None
+
+    # Canonicalize formula expressions in calculatedColumns to match exact available_columns
+    available_cols = dto.current_state.get("available_columns") if isinstance(dto.current_state, dict) else []
+    if available_cols and isinstance(available_cols, list) and isinstance(data.get("calculatedColumns"), list):
+        for calc in data["calculatedColumns"]:
+            expr = calc.get("expression")
+            if expr:
+                refs = extract_referenced_columns(expr)
+                for ref in refs:
+                    resolved = resolve_column_name(ref, available_cols)
+                    if resolved and resolved != ref:
+                        expr = expr.replace(f"[{ref}]", f"[{resolved}]")
+                calc["expression"] = expr
+            fields = calc.get("fields")
+            if isinstance(fields, list):
+                calc["fields"] = [resolve_column_name(f, available_cols) or f for f in fields]
 
     explanation = str(data.get("explanation", ""))
     return {
@@ -1449,6 +1472,25 @@ def evaluate_formula(node: ast.AST, values: dict[str, float]) -> float:
     raise ValueError("Formula hanya mendukung angka, referensi [KOLOM], +, -, *, /, dan kurung.")
 
 
+def resolve_column_name(col: str, available_columns: list[str]) -> str | None:
+    if col in available_columns:
+        return col
+    col_upper = col.upper()
+    for c in available_columns:
+        if c.upper() == col_upper:
+            return c
+    for c in available_columns:
+        if c.split(".", 1)[-1].upper() == col_upper or col.split(".", 1)[-1].upper() == c.upper():
+            return c
+    matches = [c for c in available_columns if col_upper in c.upper()]
+    if len(matches) == 1:
+        return matches[0]
+    rev_matches = [c for c in available_columns if c.upper() in col_upper]
+    if len(rev_matches) == 1:
+        return rev_matches[0]
+    return None
+
+
 def extract_referenced_columns(expression: str) -> list[str]:
     # Extracts all column names inside brackets [Column Name]
     return list(dict.fromkeys(re.findall(r"\[([^\]]+)\]", expression)))
@@ -1456,9 +1498,12 @@ def extract_referenced_columns(expression: str) -> list[str]:
 
 def run_formula_rows(rows: list[dict[str, Any]], name: str, expression: str, columns: list[str]) -> list[dict[str, Any]]:
     referenced = extract_referenced_columns(expression)
+    col_map: dict[str, str] = {}
     for col in referenced:
-        if col not in columns:
-            raise HTTPException(422, f"Kolom [{col}] pada rumus tidak ditemukan.")
+        resolved = resolve_column_name(col, columns)
+        if not resolved:
+            raise HTTPException(422, f"Kolom [{col}] pada rumus tidak ditemukan dalam data laporan.")
+        col_map[col] = resolved
     clean_expr = expression
     for i, col in enumerate(referenced):
         clean_expr = clean_expr.replace(f"[{col}]", f"v{i}")
@@ -1474,15 +1519,14 @@ def run_formula_rows(rows: list[dict[str, Any]], name: str, expression: str, col
     output = []
     for row in rows:
         values = {}
-        has_any_val = False
         for i, col in enumerate(referenced):
-            raw = row.get(col)
+            actual_col = col_map[col]
+            raw = row.get(actual_col)
             if raw is not None and str(raw).strip() != "":
                 try:
                     val = float(str(raw).strip())
                     if math.isfinite(val):
                         values[f"v{i}"] = val
-                        has_any_val = True
                     else:
                         values[f"v{i}"] = 0.0
                 except (ValueError, TypeError):
@@ -1519,20 +1563,22 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
         return {"columns": new_cols, "rows": output}
 
     # Mode 2: Standard Aggregation & Arithmetic
-    if any(field not in columns for field in dto.fields) or len(set(dto.fields)) != len(dto.fields):
+    resolved_fields = [resolve_column_name(field, columns) for field in dto.fields]
+    if any(f is None for f in resolved_fields) or len(set(resolved_fields)) != len(resolved_fields):
         raise HTTPException(422, "Pilih kolom sumber yang tersedia dan berbeda.")
+    fields_to_use = [f for f in resolved_fields if f is not None]
     aggregate = dto.operation in ("sum", "average", "min", "max")
     binary = dto.operation in ("subtract", "multiply", "divide")
     if not aggregate and not binary:
         raise HTTPException(422, "Operasi kolom tidak valid.")
-    if dto.operation == "divide" and len(dto.fields) != 2:
+    if dto.operation == "divide" and len(fields_to_use) != 2:
         raise HTTPException(422, "Operasi pembagian memerlukan tepat 2 kolom sumber.")
-    if len(dto.fields) < 2 and (binary or dto.operation in ("sum", "average")):
+    if len(fields_to_use) < 2 and (binary or dto.operation in ("sum", "average")):
         raise HTTPException(422, "Pilih minimal 2 kolom sumber.")
     output = []
     for row in dto.rows:
         values = []
-        for field in dto.fields:
+        for field in fields_to_use:
             raw = row.get(field)
             try:
                 parsed = float(raw) if raw not in (None, "") else None
@@ -1544,7 +1590,7 @@ def calculated_column_data(dto: CalculatedColumnIn) -> dict[str, Any]:
         if aggregate and numbers:
             value = {"sum": lambda: sum(numbers), "average": lambda: sum(numbers) / len(numbers),
                      "min": lambda: min(numbers), "max": lambda: max(numbers)}[dto.operation]()
-        elif binary and len(values) == len(dto.fields) and all(v is not None for v in values):
+        elif binary and len(values) == len(fields_to_use) and all(v is not None for v in values):
             if dto.operation == "subtract":
                 res = values[0]
                 for v in values[1:]:
@@ -1571,12 +1617,22 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
     # Run calculations that target pre-pivot columns first
     remaining_calcs = []
     for calculation in calcs:
-        current_cols = set(dict.fromkeys(k for r in rows for k in r))
+        current_cols = list(dict.fromkeys(k for r in rows for k in r))
         req_fields = calculation.get("fields", [])
         if calculation.get("expression"):
             req_fields = extract_referenced_columns(calculation["expression"])
-        if all(field in current_cols for field in req_fields):
-            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+        resolved_fields = [resolve_column_name(f, current_cols) for f in req_fields]
+        if resolved_fields and all(f is not None for f in resolved_fields):
+            col_payload = dict(calculation)
+            if calculation.get("expression"):
+                new_expr = calculation["expression"]
+                for old_f, new_f in zip(req_fields, resolved_fields):
+                    if new_f and old_f != new_f:
+                        new_expr = new_expr.replace(f"[{old_f}]", f"[{new_f}]")
+                col_payload["expression"] = new_expr
+            elif calculation.get("fields"):
+                col_payload["fields"] = resolved_fields
+            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **col_payload))["rows"]
         else:
             remaining_calcs.append(calculation)
             
@@ -1592,16 +1648,28 @@ def apply_report_presentation(rows: list[dict[str, Any]], presentation: dict[str
                                   
     # Run any remaining calculations that target post-pivot columns
     for calculation in remaining_calcs:
-        current_cols = set(dict.fromkeys(k for r in rows for k in r))
+        current_cols = list(dict.fromkeys(k for r in rows for k in r))
         req_fields = calculation.get("fields", [])
         if calculation.get("expression"):
             req_fields = extract_referenced_columns(calculation["expression"])
-        if all(field in current_cols for field in req_fields):
-            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **calculation))["rows"]
+        resolved_fields = [resolve_column_name(f, current_cols) for f in req_fields]
+        if resolved_fields and all(f is not None for f in resolved_fields):
+            col_payload = dict(calculation)
+            if calculation.get("expression"):
+                new_expr = calculation["expression"]
+                for old_f, new_f in zip(req_fields, resolved_fields):
+                    if new_f and old_f != new_f:
+                        new_expr = new_expr.replace(f"[{old_f}]", f"[{new_f}]")
+                col_payload["expression"] = new_expr
+            elif calculation.get("fields"):
+                col_payload["fields"] = resolved_fields
+            rows = calculated_column_data(CalculatedColumnIn(rows=rows, **col_payload))["rows"]
 
     visible = presentation.get("visibleColumns")
     if visible:
-        rows = [{key: row.get(key) for key in visible if key in row} for row in rows]
+        calc_names = [c["name"] for c in calcs if c.get("name")]
+        all_visible = list(dict.fromkeys([*visible, *calc_names]))
+        rows = [{key: row.get(key) for key in all_visible if key in row} for row in rows]
     return rows
 
 

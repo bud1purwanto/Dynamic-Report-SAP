@@ -367,6 +367,62 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(passed_filters["AUSP"][0].field, "OBJEK")
         self.assertEqual(passed_filters["AUSP"][0].value, "12345")
 
+    def test_resolve_column_name_matches(self):
+        columns = ["T1.AUFNR", "Panjang Film (Meter)", "Lebar Film (Milimeter)", "Grammage"]
+        self.assertEqual(main.resolve_column_name("T1.AUFNR", columns), "T1.AUFNR")
+        self.assertEqual(main.resolve_column_name("aufnr", columns), "T1.AUFNR")
+        self.assertEqual(main.resolve_column_name("Panjang", columns), "Panjang Film (Meter)")
+        self.assertEqual(main.resolve_column_name("lebar", columns), "Lebar Film (Milimeter)")
+        self.assertEqual(main.resolve_column_name("Grammage", columns), "Grammage")
+
+    def test_formula_with_fuzzy_columns(self):
+        rows = [{"Panjang Film (Meter)": 1000, "Lebar Film (Milimeter)": 500, "Grammage": 20}]
+        cols = ["Panjang Film (Meter)", "Lebar Film (Milimeter)", "Grammage"]
+        # AI generated: ([Panjang] * [Lebar] * [Grammage]) / 1000000
+        expr = "([Panjang] * [Lebar] * [Grammage]) / 1000000"
+        result = main.run_formula_rows(rows, "BERAT AKTUAL", expr, cols)
+        self.assertEqual(len(result), 1)
+        # 1000 * 500 * 20 / 1000000 = 10.0
+        self.assertEqual(result[0]["BERAT AKTUAL"], 10.0)
+
+    def test_apply_report_presentation_preserves_calculated_columns(self):
+        rows = [{"Panjang Film (Meter)": 1000, "Lebar Film (Milimeter)": 500, "Grammage": 20}]
+        presentation = {
+            "calculatedColumns": [
+                {"name": "BERAT AKTUAL", "operation": "custom", "expression": "([Panjang] * [Lebar] * [Grammage]) / 1000000"}
+            ],
+            "visibleColumns": ["Panjang Film (Meter)"]
+        }
+        res = main.apply_report_presentation(rows, presentation)
+        self.assertEqual(len(res), 1)
+        self.assertIn("BERAT AKTUAL", res[0])
+        self.assertEqual(res[0]["BERAT AKTUAL"], 10.0)
+
+    async def test_ai_generate_canonicalizes_column_names(self):
+        llm_response = main.json.dumps({
+            "explanation": "Menambahkan kolom hitung BERAT AKTUAL",
+            "calculatedColumns": [
+                {
+                    "name": "BERAT AKTUAL",
+                    "operation": "custom",
+                    "expression": "([Panjang] * [Lebar] * [Grammage]) / 1000000"
+                }
+            ]
+        })
+        dto = main.AiFullAssistantIn(
+            prompt="hitung berat aktual",
+            context_type="builder",
+            current_state={
+                "available_columns": ["Panjang Film (Meter)", "Lebar Film (Milimeter)", "Grammage"]
+            }
+        )
+        auth = (SimpleNamespace(user_id="alice"), "token")
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[{"id": "conn-dev", "label": "DEV"}])), \
+             patch.object(main, "query_llm_with_fallback", AsyncMock(return_value=(llm_response, "test-ai"))):
+            result = await main.ai_generate(dto, auth)
+        calc = result["data"]["calculatedColumns"][0]
+        self.assertEqual(calc["expression"], "([Panjang Film (Meter)] * [Lebar Film (Milimeter)] * [Grammage]) / 1000000")
+
 
 if __name__ == "__main__":
     unittest.main()
