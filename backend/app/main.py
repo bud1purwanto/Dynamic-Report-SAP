@@ -123,7 +123,7 @@ class ReadIn(BaseModel):
     target: str = Field(min_length=1)
     table_name: str
     fields: list[str] = Field(min_length=1, max_length=100)
-    filters: list[FilterIn] = Field(default_factory=list, max_length=30)
+    filters: list[FilterIn] = Field(default_factory=list, max_length=100)
     rowcount: int = Field(default=100, ge=1, le=50000)
 
 
@@ -173,7 +173,7 @@ class SourceIn(BaseModel):
     alias: str
     table_name: str
     fields: list[str] = Field(default_factory=list, max_length=100)
-    filters: list[FilterIn] = Field(default_factory=list, max_length=30)
+    filters: list[FilterIn] = Field(default_factory=list, max_length=100)
 
 
 class JoinConditionIn(BaseModel):
@@ -1101,7 +1101,7 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                                 )
                             elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
                                 chunk_col = right_col
-                                max_keys = 150
+                                max_keys = 300
                                 if len(distinct_vals) > max_keys:
                                     warnings.append(
                                         f"Kunci join {cond.left_field} melebihi {max_keys} ({len(distinct_vals)} unik). Mengambil data untuk {max_keys} kunci pertama."
@@ -1113,20 +1113,22 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                                     f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
                                 )
 
+        downstream_limit = 5000
         if chunk_batches and chunk_col:
             rows: list[dict[str, Any]] = []
             for batch in chunk_batches:
                 batch_filters = list(source_filters) + [FilterIn(field=chunk_col, operator="EQ", value=v) for v in batch]
                 batch_rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
                                                     fields=fields, filters=batch_filters,
-                                                    rowcount=dto.rowcount), token)
+                                                    rowcount=downstream_limit), token)
                 rows.extend(batch_rows)
-                if len(rows) >= dto.rowcount * 2:
+                if len(rows) >= 10000:
                     break
         else:
+            fetch_limit = dto.rowcount if source_idx == 0 else downstream_limit
             rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
                                           fields=fields, filters=source_filters,
-                                          rowcount=dto.rowcount), token)
+                                          rowcount=fetch_limit), token)
         frames[source.alias] = pd.DataFrame(rows, columns=fields).rename(
             columns={field: f"{source.alias}.{field}" for field in fields})
     merged = frames[dto.sources[0].alias]
@@ -1196,6 +1198,12 @@ async def run_query(dto: QueryIn, auth: tuple[AppSession, str] = Depends(get_tok
                          status="error", error=str(exc.detail)[:500]))
         db.commit()
         raise
+    except Exception as exc:
+        err_msg = str(exc)
+        db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
+                         status="error", error=err_msg[:500]))
+        db.commit()
+        raise HTTPException(500, f"Terjadi kesalahan saat mengeksekusi query: {err_msg}") from exc
     db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
                      status="success", row_count=len(result["rows"])))
     db.commit()

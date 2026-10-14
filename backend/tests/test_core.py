@@ -507,6 +507,44 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         # All 40 joined rows matched!
         self.assertEqual(len(result["rows"]), 40)
 
+    async def test_execute_query_allows_combined_source_and_chunk_filters_exceeding_30(self):
+        t1_rows = [{"AUFNR": f"{1000000 + i}", "WERKS": "1000"} for i in range(25)]
+        read_calls = []
+
+        async def read_rows(dto, _token):
+            read_calls.append(dto)
+            if dto.table_name == "AUFK":
+                return t1_rows
+            # Verify AFPO has both existing source filters and chunked AUFNR filters (>30 total)
+            self.assertGreater(len(dto.filters), 30)
+            return [{"AUFNR": f.value, "MATNR": "M1"} for f in dto.filters if f.field == "AUFNR"]
+
+        async def structure(_token, _target, table):
+            if table == "AUFK":
+                return ([{"name": "AUFNR", "data_type": "CHAR", "is_key": True},
+                         {"name": "WERKS", "data_type": "CHAR", "is_key": False}], "")
+            return ([{"name": "AUFNR", "data_type": "CHAR", "is_key": True},
+                     {"name": "MATNR", "data_type": "CHAR", "is_key": False}], "")
+
+        # T2 has 10 pre-existing filters
+        pre_filters = [main.FilterIn(field="MATNR", operator="EQ", value=f"M{i}") for i in range(10)]
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR", "WERKS"]),
+                main.SourceIn(alias="T2", table_name="AFPO", fields=["MATNR"], filters=pre_filters),
+            ],
+            joins=[main.JoinIn(left_alias="T1", left_field="AUFNR",
+                               right_alias="T2", right_field="AUFNR")],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.execute_query(query, "user-token")
+        self.assertEqual(len(result["rows"]), 25)
+
 
 if __name__ == "__main__":
     unittest.main()
+
