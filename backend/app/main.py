@@ -203,6 +203,10 @@ class ReportIn(BaseModel):
     definition: dict[str, Any]
 
 
+class ReportRenameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
 class ReportShareIn(BaseModel):
     username: str = Field(min_length=1, max_length=160)
     permission: Literal["view", "edit"] = "view"
@@ -2047,6 +2051,25 @@ async def update_report(report_id: str, dto: ReportIn,
             raise HTTPException(403, "Anda hanya memiliki izin melihat (view) untuk laporan ini. Gunakan 'Simpan Sebagai Baru' untuk menduplikasi laporan.")
     row.name = dto.name
     row.definition = dto.definition
+    db.commit()
+    return {"id": row.id, "name": row.name}
+
+
+@app.patch("/api/reports/{report_id}/rename")
+async def rename_report(report_id: str, dto: ReportRenameIn,
+                        auth: tuple[AppSession, str] = Depends(get_token),
+                        db: Session = Depends(get_db)):
+    row = db.get(Report, report_id)
+    if not row:
+        raise HTTPException(404, "Laporan tidak ditemukan.")
+    if row.owner_id != auth[0].user_id:
+        current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+        share = check_report_share_access(db, report_id, auth[0].user_id, current_username)
+        if not share:
+            raise HTTPException(404, "Laporan tidak ditemukan.")
+        if share.permission != "edit":
+            raise HTTPException(403, "Anda tidak memiliki izin untuk mengubah nama laporan ini.")
+    row.name = dto.name.strip()
     db.commit()
     return {"id": row.id, "name": row.name}
 

@@ -544,7 +544,20 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
             result = await main.execute_query(query, "user-token")
         self.assertEqual(len(result["rows"]), 25)
 
+    async def test_rename_report(self):
+        mock_db = MagicMock()
+        mock_report = SimpleNamespace(id="rep-1", owner_id="user-123", name="Old Name")
+        mock_db.get.return_value = mock_report
+
+        auth = (SimpleNamespace(user_id="user-123", user_profile={"username": "user1"}), "tok")
+        res = await main.rename_report("rep-1", main.ReportRenameIn(name="New Report Name"), auth, mock_db)
+
+        self.assertEqual(res["name"], "New Report Name")
+        self.assertEqual(mock_report.name, "New Report Name")
+        mock_db.commit.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

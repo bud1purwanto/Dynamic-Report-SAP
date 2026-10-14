@@ -5,7 +5,7 @@ import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodes
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
   AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, Bot, CheckCircle2, ChevronDown, ChevronUp, Columns3, CopyPlus, Database, Download,
-  Edit2, Eye, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen,
+  Edit2, Eye, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, MoreVertical, PanelLeftClose, PanelLeftOpen,
   Play, Plus, RotateCcw, RotateCw, Save, Scan, Search, Settings2, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, UserCheck, UserPlus, Users, X,
 } from 'lucide-react'
 import { api, post } from './api'
@@ -612,6 +612,14 @@ function App() {
   const [changePasswordLoading, setChangePasswordLoading] = useState(false)
   const [changePasswordError, setChangePasswordError] = useState('')
   const [userDropdownOpen, setUserDropdownOpen] = useState(false)
+  const [reportMenuOpen, setReportMenuOpen] = useState<string | null>(null)
+  const [renameModal, setRenameModal] = useState<{
+    open: boolean
+    reportId: string
+    name: string
+    busy: boolean
+    error: string
+  }>({ open: false, reportId: '', name: '', busy: false, error: '' })
 
   const gridRef = useRef<AgGridReact<Row>>(null)
   const flowRef = useRef<ReactFlowInstance<TableFlowNode> | null>(null)
@@ -1058,6 +1066,19 @@ function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [aiModalOpen, isCanvasFullscreen, sourcesModalOpen, relationModal, catalogModal.open, tab, builderHistoryPast, builderHistoryFuture, compareHistoryPast, compareHistoryFuture, query, calculatedColumns, activePivot, visibleColumns, compareTarget, otherTarget, compareTable, compareRowcount, compareFilters])
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (reportMenuOpen && !(e.target as HTMLElement).closest('.report-item-menu-wrap')) {
+        setReportMenuOpen(null)
+      }
+      if (userDropdownOpen && !(e.target as HTMLElement).closest('.top-right')) {
+        setUserDropdownOpen(false)
+      }
+    }
+    window.addEventListener('click', handleClickOutside)
+    return () => window.removeEventListener('click', handleClickOutside)
+  }, [reportMenuOpen, userDropdownOpen])
 
   // ==================== AI ASSISTANT LOGIC ====================
   const openAiAssistant = (mode: 'builder' | 'compare') => {
@@ -2022,6 +2043,36 @@ function App() {
     })
   }
 
+  function openRenameModal(report: { id: string; name: string }) {
+    setRenameModal({ open: true, reportId: report.id, name: report.name, busy: false, error: '' })
+  }
+
+  async function handleRenameSubmit(e?: React.FormEvent) {
+    if (e) e.preventDefault()
+    const trimmed = renameModal.name.trim()
+    if (!trimmed) {
+      setRenameModal(prev => ({ ...prev, error: 'Nama laporan tidak boleh kosong.' }))
+      return
+    }
+    setRenameModal(prev => ({ ...prev, busy: true, error: '' }))
+    try {
+      await api(`/reports/${encodeURIComponent(renameModal.reportId)}/rename`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      })
+      if (activeReport === renameModal.reportId) {
+        setReportName(trimmed)
+      }
+      setReports(prev => prev.map(r => r.id === renameModal.reportId ? { ...r, name: trimmed } : r))
+      setSharedReports(prev => prev.map(sr => sr.id === renameModal.reportId ? { ...sr, name: trimmed } : sr))
+      setNotice(`Nama laporan berhasil diubah menjadi "${trimmed}".`)
+      setRenameModal({ open: false, reportId: '', name: '', busy: false, error: '' })
+    } catch (err) {
+      setRenameModal(prev => ({ ...prev, busy: false, error: message(err) }))
+    }
+  }
+
   async function selectReport(report: Report | SharedReport, serverList: Server[] = servers) {
     pushBuilderSnapshotImmediate()
     setRelationModal(null)
@@ -2603,21 +2654,56 @@ function App() {
           <button className="report-item-btn" onClick={() => selectReport(r)} title={r.name}>
             <Table2 size={15} /><span>{r.name}</span>
           </button>
-          <div className="report-item-actions">
+          <div className="report-item-menu-wrap" onClick={e => e.stopPropagation()}>
             <button
-              className="icon-button share-report-btn"
-              title={`Bagikan "${r.name}"`}
-              onClick={e => { e.stopPropagation(); openShareModal(r) }}
+              type="button"
+              className={`icon-button report-menu-btn ${reportMenuOpen === r.id ? 'active' : ''}`}
+              title={`Opsi untuk "${r.name}"`}
+              onClick={e => {
+                e.stopPropagation()
+                setReportMenuOpen(reportMenuOpen === r.id ? null : r.id)
+              }}
             >
-              <Share2 size={13} />
+              <MoreVertical size={15} />
             </button>
-            <button
-              className="icon-button delete-report-btn"
-              title={`Hapus "${r.name}"`}
-              onClick={e => { e.stopPropagation(); deleteReport(r.id, r.name) }}
-            >
-              <Trash2 size={13} />
-            </button>
+            {reportMenuOpen === r.id && (
+              <div className="report-action-menu" onClick={e => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="report-action-item"
+                  onClick={() => {
+                    setReportMenuOpen(null)
+                    openRenameModal(r)
+                  }}
+                >
+                  <Edit2 size={13} />
+                  <span>Ganti Nama</span>
+                </button>
+                <button
+                  type="button"
+                  className="report-action-item"
+                  onClick={() => {
+                    setReportMenuOpen(null)
+                    openShareModal(r)
+                  }}
+                >
+                  <Share2 size={13} />
+                  <span>Bagikan</span>
+                </button>
+                <div className="report-action-divider" />
+                <button
+                  type="button"
+                  className="report-action-item text-danger"
+                  onClick={() => {
+                    setReportMenuOpen(null)
+                    deleteReport(r.id, r.name)
+                  }}
+                >
+                  <Trash2 size={13} />
+                  <span>Hapus</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -2637,6 +2723,36 @@ function App() {
             <span className={`permission-badge ${sr.permission}`} title={sr.permission === 'edit' ? 'Hak Akses: Edit' : 'Hak Akses: View Only'}>
               {sr.permission === 'edit' ? 'Edit' : 'View'}
             </span>
+            {sr.permission === 'edit' && (
+              <div className="report-item-menu-wrap" onClick={e => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className={`icon-button report-menu-btn ${reportMenuOpen === sr.id ? 'active' : ''}`}
+                  title={`Opsi untuk "${sr.name}"`}
+                  onClick={e => {
+                    e.stopPropagation()
+                    setReportMenuOpen(reportMenuOpen === sr.id ? null : sr.id)
+                  }}
+                >
+                  <MoreVertical size={15} />
+                </button>
+                {reportMenuOpen === sr.id && (
+                  <div className="report-action-menu" onClick={e => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="report-action-item"
+                      onClick={() => {
+                        setReportMenuOpen(null)
+                        openRenameModal(sr)
+                      }}
+                    >
+                      <Edit2 size={13} />
+                      <span>Ganti Nama</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ))}
         {!sharedReports.length && <p className="empty-shared-text">Belum ada laporan dibagikan.</p>}
@@ -3763,6 +3879,80 @@ function App() {
               {confirmModal.confirmLabel || 'Lanjutkan'}
             </button>
           </div>
+        </div>
+      </div>
+    )}
+    {renameModal.open && (
+      <div
+        className="modal-backdrop"
+        onClick={() => !renameModal.busy && setRenameModal({ open: false, reportId: '', name: '', busy: false, error: '' })}
+      >
+        <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: '420px' }}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Edit2 size={16} /></span>
+              <span>Ganti Nama Laporan</span>
+            </div>
+            <button
+              type="button"
+              className="icon-button"
+              title="Tutup"
+              disabled={renameModal.busy}
+              onClick={() => setRenameModal({ open: false, reportId: '', name: '', busy: false, error: '' })}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <form onSubmit={handleRenameSubmit}>
+            <div className="modal-body" style={{ display: 'grid', gap: '14px', padding: '20px' }}>
+              <p style={{ margin: 0, fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>
+                Tentukan nama baru untuk laporan ini:
+              </p>
+              <label style={{ display: 'grid', gap: '6px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#334863' }}>Nama Laporan</span>
+                <input
+                  type="text"
+                  value={renameModal.name}
+                  onChange={e => setRenameModal(prev => ({ ...prev, name: e.target.value, error: '' }))}
+                  placeholder="Masukkan nama laporan..."
+                  autoFocus
+                  maxLength={160}
+                  required
+                  disabled={renameModal.busy}
+                  style={{ width: '100%', height: '38px', fontSize: '12px' }}
+                />
+              </label>
+              {renameModal.error && (
+                <div className="alert error" style={{ margin: 0, padding: '8px 12px', fontSize: '11px' }}>
+                  {renameModal.error}
+                </div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="button subtle"
+                disabled={renameModal.busy}
+                onClick={() => setRenameModal({ open: false, reportId: '', name: '', busy: false, error: '' })}
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                className="button primary"
+                disabled={renameModal.busy || !renameModal.name.trim()}
+              >
+                {renameModal.busy ? (
+                  <>
+                    <span className="spinner" />
+                    <span>Menyimpan…</span>
+                  </>
+                ) : (
+                  'Simpan Perubahan'
+                )}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     )}
