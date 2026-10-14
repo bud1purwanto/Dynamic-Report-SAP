@@ -612,7 +612,14 @@ function App() {
   const [changePasswordLoading, setChangePasswordLoading] = useState(false)
   const [changePasswordError, setChangePasswordError] = useState('')
   const [userDropdownOpen, setUserDropdownOpen] = useState(false)
-  const [reportMenuOpen, setReportMenuOpen] = useState<string | null>(null)
+  const [reportMenu, setReportMenu] = useState<{
+    id: string
+    report: Report | SharedReport
+    isShared: boolean
+    top: number
+    left: number
+  } | null>(null)
+  const reportMenuOpen = reportMenu ? reportMenu.id : null
   const [renameModal, setRenameModal] = useState<{
     open: boolean
     reportId: string
@@ -1069,16 +1076,27 @@ function App() {
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (reportMenuOpen && !(e.target as HTMLElement).closest('.report-item-menu-wrap')) {
-        setReportMenuOpen(null)
+      if (reportMenu && !(e.target as HTMLElement).closest('.report-menu-btn') && !(e.target as HTMLElement).closest('.report-action-menu')) {
+        setReportMenu(null)
       }
       if (userDropdownOpen && !(e.target as HTMLElement).closest('.top-right')) {
         setUserDropdownOpen(false)
       }
     }
+    function handleScrollOrResize() {
+      if (reportMenu) {
+        setReportMenu(null)
+      }
+    }
     window.addEventListener('click', handleClickOutside)
-    return () => window.removeEventListener('click', handleClickOutside)
-  }, [reportMenuOpen, userDropdownOpen])
+    window.addEventListener('scroll', handleScrollOrResize, true)
+    window.addEventListener('resize', handleScrollOrResize)
+    return () => {
+      window.removeEventListener('click', handleClickOutside)
+      window.removeEventListener('scroll', handleScrollOrResize, true)
+      window.removeEventListener('resize', handleScrollOrResize)
+    }
+  }, [reportMenu, userDropdownOpen])
 
   // ==================== AI ASSISTANT LOGIC ====================
   const openAiAssistant = (mode: 'builder' | 'compare') => {
@@ -2043,6 +2061,37 @@ function App() {
     })
   }
 
+  function handleToggleReportMenu(e: React.MouseEvent<HTMLButtonElement>, targetReport: Report | SharedReport, isShared: boolean) {
+    e.stopPropagation()
+    if (reportMenu?.id === targetReport.id) {
+      setReportMenu(null)
+      return
+    }
+    const rect = e.currentTarget.getBoundingClientRect()
+    const menuWidth = 155
+    const menuHeight = isShared ? 48 : 138
+
+    // Posisi vertikal: jika ruang di bawah tidak cukup, tampilkan ke atas
+    const spaceBelow = window.innerHeight - rect.bottom
+    let top = rect.bottom + 4
+    if (spaceBelow < menuHeight && rect.top > menuHeight) {
+      top = rect.top - menuHeight - 4
+    } else if (top + menuHeight > window.innerHeight) {
+      top = Math.max(10, window.innerHeight - menuHeight - 10)
+    }
+
+    let left = rect.right - menuWidth
+    if (left < 10) left = 10
+
+    setReportMenu({
+      id: targetReport.id,
+      report: targetReport,
+      isShared,
+      top,
+      left,
+    })
+  }
+
   function openRenameModal(report: { id: string; name: string }) {
     setRenameModal({ open: true, reportId: report.id, name: report.name, busy: false, error: '' })
   }
@@ -2659,51 +2708,10 @@ function App() {
               type="button"
               className={`icon-button report-menu-btn ${reportMenuOpen === r.id ? 'active' : ''}`}
               title={`Opsi untuk "${r.name}"`}
-              onClick={e => {
-                e.stopPropagation()
-                setReportMenuOpen(reportMenuOpen === r.id ? null : r.id)
-              }}
+              onClick={e => handleToggleReportMenu(e, r, false)}
             >
               <MoreVertical size={15} />
             </button>
-            {reportMenuOpen === r.id && (
-              <div className="report-action-menu" onClick={e => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className="report-action-item"
-                  onClick={() => {
-                    setReportMenuOpen(null)
-                    openRenameModal(r)
-                  }}
-                >
-                  <Edit2 size={13} />
-                  <span>Ganti Nama</span>
-                </button>
-                <button
-                  type="button"
-                  className="report-action-item"
-                  onClick={() => {
-                    setReportMenuOpen(null)
-                    openShareModal(r)
-                  }}
-                >
-                  <Share2 size={13} />
-                  <span>Bagikan</span>
-                </button>
-                <div className="report-action-divider" />
-                <button
-                  type="button"
-                  className="report-action-item text-danger"
-                  onClick={() => {
-                    setReportMenuOpen(null)
-                    deleteReport(r.id, r.name)
-                  }}
-                >
-                  <Trash2 size={13} />
-                  <span>Hapus</span>
-                </button>
-              </div>
-            )}
           </div>
         </div>
       ))}
@@ -2729,34 +2737,70 @@ function App() {
                   type="button"
                   className={`icon-button report-menu-btn ${reportMenuOpen === sr.id ? 'active' : ''}`}
                   title={`Opsi untuk "${sr.name}"`}
-                  onClick={e => {
-                    e.stopPropagation()
-                    setReportMenuOpen(reportMenuOpen === sr.id ? null : sr.id)
-                  }}
+                  onClick={e => handleToggleReportMenu(e, sr, true)}
                 >
                   <MoreVertical size={15} />
                 </button>
-                {reportMenuOpen === sr.id && (
-                  <div className="report-action-menu" onClick={e => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="report-action-item"
-                      onClick={() => {
-                        setReportMenuOpen(null)
-                        openRenameModal(sr)
-                      }}
-                    >
-                      <Edit2 size={13} />
-                      <span>Ganti Nama</span>
-                    </button>
-                  </div>
-                )}
               </div>
             )}
           </div>
         ))}
         {!sharedReports.length && <p className="empty-shared-text">Belum ada laporan dibagikan.</p>}
       </div>
+
+      {reportMenu && (
+        <div
+          className="report-action-menu fixed"
+          style={{
+            top: `${reportMenu.top}px`,
+            left: `${reportMenu.left}px`,
+          }}
+          onClick={e => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="report-action-item"
+            onClick={() => {
+              const target = reportMenu.report
+              setReportMenu(null)
+              openRenameModal(target)
+            }}
+          >
+            <Edit2 size={13} />
+            <span>Ganti Nama</span>
+          </button>
+          {!reportMenu.isShared && (
+            <>
+              <button
+                type="button"
+                className="report-action-item"
+                onClick={() => {
+                  const target = reportMenu.report as Report
+                  setReportMenu(null)
+                  openShareModal(target)
+                }}
+              >
+                <Share2 size={13} />
+                <span>Bagikan</span>
+              </button>
+              <div className="report-action-divider" />
+              <button
+                type="button"
+                className="report-action-item text-danger"
+                onClick={() => {
+                  const target = reportMenu.report
+                  setReportMenu(null)
+                  deleteReport(target.id, target.name)
+                }}
+              >
+                <Trash2 size={13} />
+                <span>Hapus</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="sidebar-bottom"><div className="user-avatar">{(user.username || user.email || 'U')[0].toUpperCase()}</div>
         <div className="user-info"><strong>{user.username || user.email}</strong><small>{user.roles?.[0] || 'User'}</small></div>
         <button className="icon-button" title="Keluar" onClick={confirmLogout}><LogOut size={17} /></button></div>
