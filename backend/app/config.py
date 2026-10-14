@@ -32,6 +32,13 @@ class Settings:
     export_mask_fields: tuple[str, ...]
     ollama_base_url: str
     ollama_model: str
+    nine_router_base_url: str
+    nine_router_api_key: str
+    nine_router_model: str
+    openrouter_base_url: str
+    openrouter_api_key: str
+    openrouter_model: str
+    openrouter_fallback_model: str
 
 
 def get_settings() -> Settings:
@@ -61,6 +68,13 @@ def get_settings() -> Settings:
                                  if x.strip()),
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),
+        nine_router_base_url=os.getenv("NINE_ROUTER_BASE_URL", "http://192.168.88.83:20128/v1").rstrip("/"),
+        nine_router_api_key=os.getenv("NINE_ROUTER_API_KEY", "").strip(),
+        nine_router_model=os.getenv("NINE_ROUTER_MODEL", "ABAP-Git").strip(),
+        openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/"),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "openrouter/auto").strip(),
+        openrouter_fallback_model=os.getenv("OPENROUTER_FALLBACK_MODEL", "openrouter/free").strip(),
     )
 
 

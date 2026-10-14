@@ -1,0 +1,112 @@
+
+**** Log file opened at 2026-10-14 08:37:29.228553 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 1787825
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 08:37:29.228524 [140033414649216] >> Info entry
+	Did not find config file /data/Projects/Dynamic-Report/sapnwrfc.ini.
+
+**** Log file opened at 2026-10-14 08:37:42.801280 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 1787982
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 08:37:42.801252 [130890841704128] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 97
+2026-10-14 08:37:42.801721 [130890841704128] >> Error entry
+	[Handle: 130890738972368	ConvID: 84578456	Target: eccdevlinux	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: , Code: RFC_ABAP_RUNTIME_FAILURE, Message: Function module "RS_CUA_STATUS_INFO" not found.
+
+**** Log file opened at 2026-10-14 08:37:58.505011 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 1788188
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 08:37:58.504983 [136447833429696] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 608
+2026-10-14 08:37:58.505137 [136447833429696] >> Error entry
+	[Handle: 136447420020432	ConvID: 84599735	Target: eccdevlinux	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: LOAD_PROGRAM_NOT_FOUND, Code: RFC_ABAP_RUNTIME_FAILURE, Message: Program ZTMP_TEST_EXCL not found.
+
+**** Log file opened at 2026-10-14 08:38:35.679169 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 1788671
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 08:38:35.679141 [127653361497792] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 97
+2026-10-14 08:38:35.679538 [127653361497792] >> Error entry
+	[Handle: 127653273155280	ConvID: 84643854	Target: eccdevlinux	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: , Code: RFC_ABAP_RUNTIME_FAILURE, Message: Incorrect parameter with CALL FUNCTION.
+
+**** Log file opened at 2026-10-14 08:38:55.228276 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 1788925
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 08:38:55.228248 [125721527703232] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 97
+2026-10-14 08:38:55.228647 [125721527703232] >> Error entry
+	[Handle: 125721343178448	ConvID: 84667373	Target: eccdevlinux	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: , Code: RFC_ABAP_RUNTIME_FAILURE, Message: Illegal access to a string (length too large)

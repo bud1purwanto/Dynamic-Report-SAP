@@ -4,9 +4,9 @@ import type { ColDef } from 'ag-grid-community'
 import { ReactFlow, Background, Controls, Handle, MarkerType, Position, useNodesState, useUpdateNodeInternals } from '@xyflow/react'
 import type { Connection, Node, NodeProps, ReactFlowInstance } from '@xyflow/react'
 import {
-  AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, CheckCircle2, ChevronDown, Columns3, CopyPlus, Database, Download,
-  Edit2, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen,
-  Play, Plus, Save, Scan, Search, Settings2, ShieldCheck, SlidersHorizontal, Table2, Trash2, X,
+  AlertTriangle, ArrowRight, ArrowUp, BarChart3, BookOpen, Bot, CheckCircle2, ChevronDown, ChevronUp, Columns3, CopyPlus, Database, Download,
+  Edit2, Eye, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen,
+  Play, Plus, RotateCcw, RotateCw, Save, Scan, Search, Settings2, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, UserCheck, UserPlus, Users, X,
 } from 'lucide-react'
 import { api, post } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
@@ -16,6 +16,96 @@ type PivotConfig = { rows: string[]; column: string; value: string; fallback_val
 type CalculatedColumn = { name: string; operation: string; fields?: string[]; expression?: string }
 type ReportDefinition = Query & { presentation?: { pivot?: PivotConfig | null; calculatedColumns?: CalculatedColumn[]; visibleColumns?: string[] } }
 type Report = { id: string; name: string; definition: ReportDefinition }
+type SharedReport = {
+  id: string
+  name: string
+  definition: ReportDefinition
+  permission: 'view' | 'edit'
+  shared_by: string
+  share_id: string
+  updated_at?: string
+}
+
+type BuilderHistoryItem = {
+  query: Query
+  calculatedColumns: CalculatedColumn[]
+  activePivot: PivotConfig | null
+  visibleColumns: string[]
+}
+
+type CompareHistoryItem = {
+  compareTarget: string
+  otherTarget: string
+  compareTable: string
+  compareRowcount: number
+  compareFilters: Source['filters']
+}
+
+type AiProviderInfo = {
+  name: string
+  endpoint: string
+  model: string
+  configured: boolean
+  online: boolean
+}
+
+type AiStatusResponse = {
+  primary: AiProviderInfo
+  fallback: AiProviderInfo
+}
+
+type AiGenerateResponse = {
+  provider: string
+  explanation: string
+  data: {
+    target?: string
+    rowcount?: number
+    sources?: {
+      alias: string
+      table_name: string
+      fields: string[]
+      filters?: { field: string; operator: string; value: string; high_value?: string; sign?: 'I' | 'E' }[]
+    }[]
+    joins?: {
+      left_alias: string
+      right_alias: string
+      how?: string
+      left_field?: string
+      right_field?: string
+      conditions?: { left_field: string; right_field: string }[]
+    }[]
+    calculatedColumns?: {
+      name: string
+      operation?: string
+      expression?: string
+      fields?: string[]
+    }[]
+    pivot?: {
+      rows: string[]
+      column: string
+      value: string
+      fallback_value?: string
+      aggregation: string
+    } | null
+    visibleColumns?: string[]
+    other_target?: string
+    table_name?: string
+    filters?: { field: string; operator: string; value: string; high_value?: string; sign?: 'I' | 'E' }[]
+  }
+}
+type ReportShareItem = {
+  id: string
+  report_id: string
+  shared_with_username: string
+  permission: 'view' | 'edit'
+  created_at?: string
+  updated_at?: string
+}
+type AvailableUser = {
+  username: string
+  name: string
+  role: string
+}
 type Credential = { connectionId: string; target?: string; hasCredential: boolean; username?: string }
 type Variant = { id: string; name: string; layout: {
   columns: string[]
@@ -48,10 +138,106 @@ type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
 type ReportRun = { id: string; report_id: string | null; status: string; row_count: number; has_artifact: boolean;
   error: string | null; started_at: string }
-type StructureField = { name: string; is_key: boolean; data_type: string; description?: string; check_table?: string }
-function fieldTitle(field: StructureField): string {
-  return [field.name, field.description, field.data_type].filter(Boolean).join(' · ')
+type StructureField = {
+  name: string
+  is_key: boolean
+  data_type: string
+  description?: string
+  check_table?: string
+  length?: number
+  output_length?: number
+  decimals?: number
+  position?: number
 }
+
+function fieldTitle(field: StructureField): string {
+  const parts = [field.name, field.description]
+  if (field.data_type) {
+    const len = field.output_length || field.length
+    parts.push(len ? `${field.data_type}(${len})` : field.data_type)
+  }
+  return parts.filter(Boolean).join(' · ')
+}
+
+function getFieldInputProps(meta?: StructureField, fieldName?: string) {
+  const name = (meta?.name || fieldName || '').toUpperCase()
+  let rawType = (meta?.data_type || '').toUpperCase()
+
+  // Standard SAP numeric fields fallback if DDIC type was returned as generic CHAR or empty
+  if (!rawType || rawType === 'CHAR') {
+    if (['AUFNR', 'POSNR', 'BANFN', 'BNFPO', 'EBELP', 'VGPOS', 'LINUM', 'PERNR', 'VORNR', 'RSNUM', 'RSPOS'].includes(name) || name.endsWith('NUM')) {
+      rawType = 'NUMC'
+    } else if (name === 'MANDT') {
+      rawType = 'CLNT'
+    }
+  }
+
+  const isDate = rawType === 'DATS' || rawType === 'DATE' ||
+    name.endsWith('DAT') || name.endsWith('DATE') || name.endsWith('DT') ||
+    ['ERDAT', 'AEDAT', 'FKDAT', 'BLDAT', 'BUDAT', 'BEDAT', 'AUDAT', 'WADAT', 'LFDAT', 'CPUDT', 'DATUM'].includes(name)
+
+  const isTime = rawType === 'TIMS' || rawType === 'TIME' || name.endsWith('TIM') || name.endsWith('TIME') || ['CPUTM', 'UZEIT', 'ERZET'].includes(name)
+
+  const isPureNumber = ['NUMC', 'INT1', 'INT2', 'INT4', 'INT8', 'CLNT'].includes(rawType)
+  const isNumeric = isPureNumber || ['DEC', 'CURR', 'QUAN', 'FLTP'].includes(rawType)
+
+  let maxLength: number | undefined = meta?.output_length || meta?.length
+  if (!maxLength) {
+    if (isDate) maxLength = 10
+    else if (isTime) maxLength = 8
+    else if (name === 'MANDT') maxLength = 3
+    else if (['WERKS', 'LGORT', 'BUKRS', 'GSBER', 'AUART', 'BSART', 'MTART', 'VKORG'].includes(name)) maxLength = 4
+    else if (['VTWEG', 'SPART'].includes(name)) maxLength = 2
+    else if (['BWART', 'MEINS'].includes(name)) maxLength = 3
+    else if (['WAERK', 'WAERS'].includes(name)) maxLength = 5
+    else if (name === 'POSNR') maxLength = 6
+    else if (['CHARG', 'KUNNR', 'LIFNR', 'BELNR', 'EBELN', 'VBELN'].includes(name)) maxLength = 10
+    else if (name === 'AUFNR') maxLength = 12
+    else if (name === 'MATNR') maxLength = 18
+  }
+
+  const typeLabel = rawType
+    ? `${rawType}${maxLength ? `(${maxLength})` : ''}`
+    : isDate
+      ? 'DATS(10)'
+      : maxLength
+        ? `CHAR(${maxLength})`
+        : ''
+
+  return {
+    isDate,
+    isTime,
+    isNumeric,
+    isPureNumber,
+    maxLength,
+    typeLabel,
+  }
+}
+
+function toIsoDate(val: string): string {
+  if (!val) return ''
+  const t = val.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t
+  const dmy = t.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`
+  }
+  const ymd = t.match(/^(\d{4})(\d{2})(\d{2})$/)
+  if (ymd) {
+    return `${ymd[1]}-${ymd[2]}-${ymd[3]}`
+  }
+  return ''
+}
+
+function toDisplayDate(iso: string): string {
+  if (!iso) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [y, m, d] = iso.split('-')
+    return `${d}.${m}.${y}`
+  }
+  return iso
+}
+
 function FieldName({ field, showType = false }: { field: StructureField; showType?: boolean }) {
   return <span className="technical-field" title={fieldTitle(field)}><strong>{field.name}</strong>{field.description && <span className="technical-description">{field.description}</span>}{showType && field.data_type && <small>{field.data_type}</small>}</span>
 }
@@ -273,6 +459,30 @@ function App() {
   const [servers, setServers] = useState<Server[]>([])
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [reports, setReports] = useState<Report[]>([])
+  const [sharedReports, setSharedReports] = useState<SharedReport[]>([])
+  const [activeSharedPermission, setActiveSharedPermission] = useState<'owner' | 'view' | 'edit'>('owner')
+  const [availableUsers, setAvailableUsers] = useState<AvailableUser[]>([])
+  const [shareModal, setShareModal] = useState<{
+    open: boolean
+    report: Report | null
+    shares: ReportShareItem[]
+    loading: boolean
+    targetUsername: string
+    permission: 'view' | 'edit'
+    saving: boolean
+    error: string
+  }>({
+    open: false,
+    report: null,
+    shares: [],
+    loading: false,
+    targetUsername: '',
+    permission: 'view',
+    saving: false,
+    error: '',
+  })
+  const [shareUserDropdownOpen, setShareUserDropdownOpen] = useState(false)
+  const shareDropdownRef = useRef<HTMLDivElement>(null)
   const [query, setQuery] = useState<Query>(initialQuery)
   const [data, setData] = useState<GridData>({ columns: [], rows: [] })
   const [baseData, setBaseData] = useState<GridData>({ columns: [], rows: [] })
@@ -329,6 +539,28 @@ function App() {
   const [compareVariants, setCompareVariants] = useState<CompareVariant[]>([])
   const [compareVariantName, setCompareVariantName] = useState('')
   const [activeCompareVariant, setActiveCompareVariant] = useState('')
+
+  // ==================== UNDO / REDO HISTORY STATES ====================
+  const [builderHistoryPast, setBuilderHistoryPast] = useState<BuilderHistoryItem[]>([])
+  const [builderHistoryFuture, setBuilderHistoryFuture] = useState<BuilderHistoryItem[]>([])
+  const [compareHistoryPast, setCompareHistoryPast] = useState<CompareHistoryItem[]>([])
+  const [compareHistoryFuture, setCompareHistoryFuture] = useState<CompareHistoryItem[]>([])
+
+  const isHistoryActionRef = useRef(false)
+  const lastBuilderSnapshotRef = useRef<string>('')
+  const lastCompareSnapshotRef = useRef<string>('')
+
+  // ==================== AI ASSISTANT STATES ====================
+  const [aiModalOpen, setAiModalOpen] = useState(false)
+  const [aiContextMode, setAiContextMode] = useState<'builder' | 'compare'>('builder')
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiProgress, setAiProgress] = useState(0)
+  const [aiProgressStage, setAiProgressStage] = useState('')
+  const [aiError, setAiError] = useState('')
+  const [aiProviderStatus, setAiProviderStatus] = useState<AiStatusResponse | null>(null)
+  const [aiResult, setAiResult] = useState<AiGenerateResponse | null>(null)
+
   useEffect(() => { setCompareResult(null); setCompareRows([]) }, [compareTarget, otherTarget, compareTable, compareFilters, compareRowcount])
   useEffect(() => {
     setCompareMetadata([])
@@ -460,9 +692,10 @@ function App() {
   }
 
   async function loadWorkspace() {
-    const [catalog, saved, creds, compVariants] = await Promise.allSettled([
+    const [catalog, saved, shared, creds, compVariants] = await Promise.allSettled([
       api<{ resources: Server[] }>('/sap/servers'),
       api<Report[]>('/reports'),
+      api<SharedReport[]>('/reports/shared'),
       api<Credential[]>('/sap/credentials'),
       api<CompareVariant[]>('/compare-variants'),
     ])
@@ -476,20 +709,25 @@ function App() {
       setCredTarget(t => hasTarget(t) ? t : allowed[0]?.id || '')
       setOtherTarget(t => hasTarget(t) ? t : allowed.find(server => server.id !== (hasTarget(compareTarget) ? compareTarget : allowed[0]?.id))?.id || '')
     }
+    const reportList = saved.status === 'fulfilled' ? saved.value : []
+    const sharedList = shared.status === 'fulfilled' ? shared.value : []
     if (saved.status === 'fulfilled') {
-      const reportList = saved.value
       setReports(reportList)
-      const lastReportId = localStorage.getItem('lumina_active_report_id')
-      const targetReport = reportList.find(r => r.id === lastReportId)
-      if (targetReport && !activeReport) {
-        await selectReport(targetReport, serverList)
-      } else if (!activeReport) {
-        setActiveReport(cur => reportList.some(r => r.id === cur) ? cur : '')
-      }
+    }
+    if (shared.status === 'fulfilled') {
+      setSharedReports(sharedList)
+    }
+    const allReports = [...reportList, ...sharedList]
+    const lastReportId = localStorage.getItem('lumina_active_report_id')
+    const targetReport = allReports.find(r => r.id === lastReportId)
+    if (targetReport && !activeReport) {
+      await selectReport(targetReport, serverList)
+    } else if (!activeReport) {
+      setActiveReport(cur => allReports.some(r => r.id === cur) ? cur : '')
     }
     if (creds.status === 'fulfilled') setCredentials(creds.value)
     if (compVariants.status === 'fulfilled') setCompareVariants(compVariants.value)
-    const failed = [catalog, saved, creds, compVariants].find(x => x.status === 'rejected')
+    const failed = [catalog, saved, shared, creds, compVariants].find(x => x.status === 'rejected')
     if (failed?.status === 'rejected') setError(message(failed.reason))
   }
 
@@ -582,16 +820,455 @@ function App() {
   }, [isCanvasFullscreen, sourcesCollapsed])
 
   useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (shareDropdownRef.current && !shareDropdownRef.current.contains(e.target as unknown as globalThis.Node)) {
+        setShareUserDropdownOpen(false)
+      }
+    }
+    if (shareUserDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [shareUserDropdownOpen])
+
+  // ==================== UNDO / REDO HISTORY LOGIC ====================
+  const pushBuilderSnapshotImmediate = () => {
+    const currentSnapshot: BuilderHistoryItem = {
+      query: JSON.parse(JSON.stringify(query)),
+      calculatedColumns: JSON.parse(JSON.stringify(calculatedColumns)),
+      activePivot: activePivot ? JSON.parse(JSON.stringify(activePivot)) : null,
+      visibleColumns: [...visibleColumns],
+    }
+    const serialized = JSON.stringify(currentSnapshot)
+    if (serialized === lastBuilderSnapshotRef.current) return
+    setBuilderHistoryPast(prev => [...prev.slice(-35), currentSnapshot])
+    setBuilderHistoryFuture([])
+    lastBuilderSnapshotRef.current = serialized
+  }
+
+  const pushCompareSnapshotImmediate = () => {
+    const currentSnapshot: CompareHistoryItem = {
+      compareTarget,
+      otherTarget,
+      compareTable,
+      compareRowcount,
+      compareFilters: JSON.parse(JSON.stringify(compareFilters)),
+    }
+    const serialized = JSON.stringify(currentSnapshot)
+    if (serialized === lastCompareSnapshotRef.current) return
+    setCompareHistoryPast(prev => [...prev.slice(-35), currentSnapshot])
+    setCompareHistoryFuture([])
+    lastCompareSnapshotRef.current = serialized
+  }
+
+  // Automatic debounced tracker for builder state
+  useEffect(() => {
+    if (isHistoryActionRef.current) {
+      isHistoryActionRef.current = false
+      return
+    }
+    const currentSnapshot: BuilderHistoryItem = {
+      query,
+      calculatedColumns,
+      activePivot,
+      visibleColumns,
+    }
+    const serialized = JSON.stringify(currentSnapshot)
+    if (!lastBuilderSnapshotRef.current) {
+      lastBuilderSnapshotRef.current = serialized
+      return
+    }
+    if (serialized === lastBuilderSnapshotRef.current) return
+
+    const timer = window.setTimeout(() => {
+      try {
+        const pastItem = JSON.parse(lastBuilderSnapshotRef.current)
+        setBuilderHistoryPast(prev => [...prev.slice(-35), pastItem])
+        setBuilderHistoryFuture([])
+        lastBuilderSnapshotRef.current = serialized
+      } catch {}
+    }, 600)
+
+    return () => window.clearTimeout(timer)
+  }, [query, calculatedColumns, activePivot, visibleColumns])
+
+  // Automatic debounced tracker for compare state
+  useEffect(() => {
+    if (isHistoryActionRef.current) {
+      isHistoryActionRef.current = false
+      return
+    }
+    const currentSnapshot: CompareHistoryItem = {
+      compareTarget,
+      otherTarget,
+      compareTable,
+      compareRowcount,
+      compareFilters,
+    }
+    const serialized = JSON.stringify(currentSnapshot)
+    if (!lastCompareSnapshotRef.current) {
+      lastCompareSnapshotRef.current = serialized
+      return
+    }
+    if (serialized === lastCompareSnapshotRef.current) return
+
+    const timer = window.setTimeout(() => {
+      try {
+        const pastItem = JSON.parse(lastCompareSnapshotRef.current)
+        setCompareHistoryPast(prev => [...prev.slice(-35), pastItem])
+        setCompareHistoryFuture([])
+        lastCompareSnapshotRef.current = serialized
+      } catch {}
+    }, 600)
+
+    return () => window.clearTimeout(timer)
+  }, [compareTarget, otherTarget, compareTable, compareRowcount, compareFilters])
+
+  // Undo Handler
+  const handleUndo = () => {
+    if (tab === 'builder') {
+      if (builderHistoryPast.length === 0) return
+      const currentSnapshot: BuilderHistoryItem = {
+        query: JSON.parse(JSON.stringify(query)),
+        calculatedColumns: JSON.parse(JSON.stringify(calculatedColumns)),
+        activePivot: activePivot ? JSON.parse(JSON.stringify(activePivot)) : null,
+        visibleColumns: [...visibleColumns],
+      }
+      const previous = builderHistoryPast[builderHistoryPast.length - 1]
+      isHistoryActionRef.current = true
+      setBuilderHistoryPast(prev => prev.slice(0, prev.length - 1))
+      setBuilderHistoryFuture(prev => [currentSnapshot, ...prev])
+
+      setQuery(previous.query)
+      setCalculatedColumns(previous.calculatedColumns)
+      setActivePivot(previous.activePivot)
+      setVisibleColumns(previous.visibleColumns)
+      lastBuilderSnapshotRef.current = JSON.stringify(previous)
+      pushToast({ type: 'info', title: 'Undo', message: 'Perubahan berhasil dibatalkan.' })
+    } else if (tab === 'compare') {
+      if (compareHistoryPast.length === 0) return
+      const currentSnapshot: CompareHistoryItem = {
+        compareTarget,
+        otherTarget,
+        compareTable,
+        compareRowcount,
+        compareFilters: JSON.parse(JSON.stringify(compareFilters)),
+      }
+      const previous = compareHistoryPast[compareHistoryPast.length - 1]
+      isHistoryActionRef.current = true
+      setCompareHistoryPast(prev => prev.slice(0, prev.length - 1))
+      setCompareHistoryFuture(prev => [currentSnapshot, ...prev])
+
+      setCompareTarget(previous.compareTarget)
+      setOtherTarget(previous.otherTarget)
+      setCompareTable(previous.compareTable)
+      setCompareRowcount(previous.compareRowcount)
+      setCompareFilters(previous.compareFilters)
+      lastCompareSnapshotRef.current = JSON.stringify(previous)
+      pushToast({ type: 'info', title: 'Undo', message: 'Perubahan perbandingan berhasil dibatalkan.' })
+    }
+  }
+
+  // Redo Handler
+  const handleRedo = () => {
+    if (tab === 'builder') {
+      if (builderHistoryFuture.length === 0) return
+      const currentSnapshot: BuilderHistoryItem = {
+        query: JSON.parse(JSON.stringify(query)),
+        calculatedColumns: JSON.parse(JSON.stringify(calculatedColumns)),
+        activePivot: activePivot ? JSON.parse(JSON.stringify(activePivot)) : null,
+        visibleColumns: [...visibleColumns],
+      }
+      const next = builderHistoryFuture[0]
+      isHistoryActionRef.current = true
+      setBuilderHistoryFuture(prev => prev.slice(1))
+      setBuilderHistoryPast(prev => [...prev, currentSnapshot])
+
+      setQuery(next.query)
+      setCalculatedColumns(next.calculatedColumns)
+      setActivePivot(next.activePivot)
+      setVisibleColumns(next.visibleColumns)
+      lastBuilderSnapshotRef.current = JSON.stringify(next)
+      pushToast({ type: 'info', title: 'Redo', message: 'Perubahan diterapkan kembali.' })
+    } else if (tab === 'compare') {
+      if (compareHistoryFuture.length === 0) return
+      const currentSnapshot: CompareHistoryItem = {
+        compareTarget,
+        otherTarget,
+        compareTable,
+        compareRowcount,
+        compareFilters: JSON.parse(JSON.stringify(compareFilters)),
+      }
+      const next = compareHistoryFuture[0]
+      isHistoryActionRef.current = true
+      setCompareHistoryFuture(prev => prev.slice(1))
+      setCompareHistoryPast(prev => [...prev, currentSnapshot])
+
+      setCompareTarget(next.compareTarget)
+      setOtherTarget(next.otherTarget)
+      setCompareTable(next.compareTable)
+      setCompareRowcount(next.compareRowcount)
+      setCompareFilters(next.compareFilters)
+      lastCompareSnapshotRef.current = JSON.stringify(next)
+      pushToast({ type: 'info', title: 'Redo', message: 'Perubahan perbandingan diterapkan kembali.' })
+    }
+  }
+
+  // Global Keyboard Listener (Escape, Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
+  useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && isCanvasFullscreen && !sourcesModalOpen && !relationModal && !catalogModal.open) {
-        setIsCanvasFullscreen(false)
+      if (e.key === 'Escape') {
+        if (aiModalOpen) {
+          setAiModalOpen(false)
+          return
+        }
+        if (isCanvasFullscreen && !sourcesModalOpen && !relationModal && !catalogModal.open) {
+          setIsCanvasFullscreen(false)
+        }
+        return
+      }
+
+      if (!(e.ctrlKey || e.metaKey)) return
+      const activeEl = document.activeElement as HTMLElement | null
+      const isInput = activeEl && (
+        activeEl.tagName === 'INPUT' ||
+        activeEl.tagName === 'TEXTAREA' ||
+        activeEl.isContentEditable
+      )
+      if (isInput) return
+
+      if (e.key === 'z' || e.key === 'Z') {
+        e.preventDefault()
+        if (e.shiftKey) {
+          handleRedo()
+        } else {
+          handleUndo()
+        }
+      } else if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault()
+        handleRedo()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isCanvasFullscreen, sourcesModalOpen, relationModal, catalogModal.open])
+  }, [aiModalOpen, isCanvasFullscreen, sourcesModalOpen, relationModal, catalogModal.open, tab, builderHistoryPast, builderHistoryFuture, compareHistoryPast, compareHistoryFuture, query, calculatedColumns, activePivot, visibleColumns, compareTarget, otherTarget, compareTable, compareRowcount, compareFilters])
 
-  function resetWorkspace() {
+  // ==================== AI ASSISTANT LOGIC ====================
+  const openAiAssistant = (mode: 'builder' | 'compare') => {
+    setAiContextMode(mode)
+    setAiModalOpen(true)
+    setAiError('')
+    setAiResult(null)
+    setAiProgress(0)
+    setAiProgressStage('')
+    api<AiStatusResponse>('/ai/status')
+      .then(res => setAiProviderStatus(res))
+      .catch(() => {})
+  }
+
+  const runAiAssistant = async () => {
+    if (!aiPrompt.trim() || aiLoading) return
+    setAiLoading(true)
+    setAiError('')
+    setAiResult(null)
+    setAiProgress(12)
+    setAiProgressStage(aiContextMode === 'builder' ? 'Menganalisis kebutuhan & skema SAP...' : 'Menganalisis kriteria perbandingan...')
+
+    const currentState = aiContextMode === 'compare' ? {
+      compareTarget,
+      otherTarget,
+      compareTable,
+      compareRowcount,
+      compareFilters,
+    } : {
+      target: query.target,
+      rowcount: query.rowcount,
+      sources: query.sources,
+      joins: query.joins,
+      calculatedColumns,
+      pivot: activePivot,
+    }
+
+    const progressStages = aiContextMode === 'builder' ? [
+      { target: 28, text: 'Menganalisis tabel SAP & field yang relevan...', delay: 500 },
+      { target: 52, text: 'Menyusun relasi join, filter & klausa query...', delay: 1300 },
+      { target: 74, text: 'Menghitung kalkulasi kolom & konfigurasi pivot...', delay: 2400 },
+      { target: 88, text: 'Menghubungkan ke AI LLM & menyelaraskan JSON...', delay: 3500 },
+      { target: 95, text: 'Menyelesaikan respons rancangan sistem...', delay: 5000 },
+    ] : [
+      { target: 35, text: 'Memeriksa konfigurasi server SAP pembanding...', delay: 500 },
+      { target: 65, text: 'Menyusun kriteria tabel dan parameter filter...', delay: 1400 },
+      { target: 88, text: 'Menghubungkan ke AI LLM & menyelaraskan JSON...', delay: 2700 },
+      { target: 95, text: 'Menyelesaikan respons rancangan sistem...', delay: 4200 },
+    ]
+
+    const startTime = Date.now()
+    const timer = window.setInterval(() => {
+      const elapsed = Date.now() - startTime
+      for (let i = progressStages.length - 1; i >= 0; i--) {
+        if (elapsed >= progressStages[i].delay) {
+          setAiProgress(prev => Math.max(prev, progressStages[i].target))
+          setAiProgressStage(progressStages[i].text)
+          break
+        }
+      }
+    }, 200)
+
+    try {
+      const res = await post<AiGenerateResponse>('/ai/generate', {
+        prompt: aiPrompt.trim(),
+        context_type: aiContextMode,
+        current_state: currentState,
+      })
+      window.clearInterval(timer)
+      setAiProgress(100)
+      setAiProgressStage('Rancangan selesai dibuat!')
+      await new Promise(r => window.setTimeout(r, 260))
+      setAiResult(res)
+    } catch (err) {
+      window.clearInterval(timer)
+      setAiError(message(err))
+    } finally {
+      window.clearInterval(timer)
+      setAiLoading(false)
+    }
+  }
+
+  const applyAiResult = () => {
+    if (!aiResult) return
+    const aiData = aiResult.data
+
+    if (aiContextMode === 'builder') {
+      pushBuilderSnapshotImmediate()
+
+      // 1. Process sources
+      const rawSources = aiData.sources || []
+      const newSources: Source[] = rawSources.length > 0 ? rawSources.map((s, idx) => ({
+        alias: s.alias || `T${idx + 1}`,
+        table_name: (s.table_name || '').toUpperCase().trim(),
+        fields: Array.isArray(s.fields) ? s.fields.map(f => String(f).toUpperCase().trim()) : [],
+        filters: Array.isArray(s.filters) ? s.filters.map(f => ({
+          field: String(f.field).toUpperCase().trim(),
+          operator: f.operator || 'EQ',
+          value: String(f.value || ''),
+          high_value: f.high_value ? String(f.high_value) : '',
+          sign: f.sign || 'I',
+        })) : [],
+      })) : query.sources
+
+      // 2. Process joins
+      const rawJoins = aiData.joins || []
+      const newJoins: Join[] = rawJoins.map(j => {
+        const conds = Array.isArray(j.conditions) && j.conditions.length > 0
+          ? j.conditions.map(c => ({ left_field: String(c.left_field).toUpperCase().trim(), right_field: String(c.right_field).toUpperCase().trim() }))
+          : [{ left_field: String(j.left_field || '').toUpperCase().trim(), right_field: String(j.right_field || '').toUpperCase().trim() }]
+        return {
+          left_alias: j.left_alias,
+          right_alias: j.right_alias,
+          how: j.how || 'left',
+          left_field: conds[0]?.left_field || '',
+          right_field: conds[0]?.right_field || '',
+          conditions: conds,
+          manual: true,
+        }
+      })
+
+      // 3. Process calculated columns
+      const rawCalcs = aiData.calculatedColumns || []
+      const newCalcs: CalculatedColumn[] = rawCalcs.map(c => ({
+        name: (c.name || 'CALC').toUpperCase().trim(),
+        operation: c.operation || 'custom',
+        expression: c.expression || '',
+        fields: c.fields || [],
+      }))
+
+      // 4. Process pivot
+      let newPivot: PivotConfig | null = null
+      if (aiData.pivot && aiData.pivot.column && aiData.pivot.value) {
+        newPivot = {
+          rows: Array.isArray(aiData.pivot.rows) ? aiData.pivot.rows : [aiData.pivot.rows],
+          column: aiData.pivot.column,
+          value: aiData.pivot.value,
+          fallback_value: aiData.pivot.fallback_value || '',
+          aggregation: aiData.pivot.aggregation || 'first',
+        }
+        setPivotRows(newPivot.rows)
+        setPivotColumn(newPivot.column)
+        setPivotValue(newPivot.value)
+        setPivotFallbackValue(newPivot.fallback_value || '')
+        setPivotAgg(newPivot.aggregation)
+      } else {
+        setActivePivot(null)
+      }
+
+      // 5. Target & rowcount
+      const targetServer = (aiData.target && servers.some(s => s.id === aiData.target))
+        ? aiData.target
+        : (query.target || servers[0]?.id || '')
+      const newRowcount = Number(aiData.rowcount) || query.rowcount || 100
+
+      const updatedQuery: Query = {
+        target: targetServer,
+        rowcount: newRowcount,
+        sources: newSources,
+        joins: newJoins,
+      }
+
+      setQuery(updatedQuery)
+      setCalculatedColumns(newCalcs)
+      if (newPivot) setActivePivot(newPivot)
+      if (Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0) {
+        setVisibleColumns(aiData.visibleColumns)
+      } else {
+        setVisibleColumns([])
+      }
+      setAiModalOpen(false)
+
+      pushToast({
+        type: 'success',
+        title: 'Asisten AI Diterapkan',
+        message: 'Konfigurasi query, join, kolom & pivot berhasil diterapkan ke workspace! Tekan Ctrl+Z untuk membatalkan (Undo).',
+      })
+    } else if (aiContextMode === 'compare') {
+      pushCompareSnapshotImmediate()
+
+      if (aiData.target && servers.some(s => s.id === aiData.target)) {
+        setCompareTarget(aiData.target)
+      }
+      if (aiData.other_target && servers.some(s => s.id === aiData.other_target)) {
+        setOtherTarget(aiData.other_target)
+      }
+      if (aiData.table_name) {
+        setCompareTable(aiData.table_name.toUpperCase().trim())
+      }
+      if (aiData.rowcount) {
+        setCompareRowcount(Number(aiData.rowcount))
+      }
+      if (Array.isArray(aiData.filters)) {
+        setCompareFilters(aiData.filters.map(f => ({
+          field: String(f.field).toUpperCase().trim(),
+          operator: f.operator || 'EQ',
+          value: String(f.value || ''),
+          high_value: f.high_value ? String(f.high_value) : '',
+          sign: f.sign || 'I',
+        })))
+      }
+      setAiModalOpen(false)
+
+      pushToast({
+        type: 'success',
+        title: 'Asisten AI Diterapkan',
+        message: 'Pengaturan perbandingan data berhasil diterapkan ke form!',
+      })
+    }
+  }
+
+  function resetWorkspace(recordHistory: boolean = true) {
+    if (recordHistory) {
+      pushBuilderSnapshotImmediate()
+    }
     setRelationModal(null)
     setActiveReport('')
     localStorage.removeItem('lumina_active_report_id')
@@ -636,7 +1313,7 @@ function App() {
     try {
       const result = await post<{ user: User }>('/auth/login', { username: loginName, password: loginPassword })
       setUser(result.user); setLoginPassword('')
-      resetWorkspace()
+      resetWorkspace(false)
       await loadWorkspace()
     } catch (e) { setError(message(e)) }
     finally { setBusy(false) }
@@ -645,7 +1322,7 @@ function App() {
   async function doLogout() {
     await post('/auth/logout', {}).catch(() => {})
     setUser(null); setReports([])
-    resetWorkspace()
+    resetWorkspace(false)
   }
 
   function confirmLogout() {
@@ -759,6 +1436,7 @@ function App() {
 
   function removeSource(index: number) {
     if (index === 0) return
+    pushBuilderSnapshotImmediate()
     const alias = query.sources[index].alias
     setFieldText(current => { const next = { ...current }; delete next[alias]; return next })
     setQuery(q => {
@@ -966,6 +1644,7 @@ function App() {
     }
     setBusy(true); setError('')
     try {
+      pushBuilderSnapshotImmediate()
       const config: PivotConfig = {
         rows,
         column: pivotColumn,
@@ -1011,6 +1690,7 @@ function App() {
   async function removeCalculatedColumn(index: number) {
     const target = calculatedColumns[index]
     if (!target) return
+    pushBuilderSnapshotImmediate()
     setBusy(true); setError('')
     try {
       const updated = calculatedColumns.filter((_, i) => i !== index)
@@ -1033,6 +1713,7 @@ function App() {
       return
     }
 
+    pushBuilderSnapshotImmediate()
     let calculation: CalculatedColumn
     if (formulaMode === 'custom') {
       const expr = formulaExpression.trim()
@@ -1132,6 +1813,10 @@ function App() {
   async function saveReport() {
     const name = reportName.trim()
     if (!name) { setError('Isi nama laporan.'); return }
+    if (activeSharedPermission === 'view') {
+      setError('Laporan ini dibagikan dengan hak akses hanya melihat (View). Gunakan "Simpan Sebagai Salinan Baru" untuk menyimpan salinan ke laporan milik Anda sendiri.')
+      return
+    }
     setBusy(true); setError('')
     try {
       const definition: ReportDefinition = { ...query, presentation: { pivot: activePivot, calculatedColumns, visibleColumns } }
@@ -1145,6 +1830,7 @@ function App() {
       } else {
         const saved = await post<{ id: string }>('/reports', { name, definition })
         setActiveReport(saved.id)
+        setActiveSharedPermission('owner')
         localStorage.setItem('lumina_active_report_id', saved.id)
         setNotice(`Laporan "${name}" berhasil disimpan.`)
       }
@@ -1160,6 +1846,7 @@ function App() {
     try {
       const saved = await post<{ id: string }>('/reports', { name, definition: { ...query, presentation: { pivot: activePivot, calculatedColumns, visibleColumns } } })
       setActiveReport(saved.id)
+      setActiveSharedPermission('owner')
       localStorage.setItem('lumina_active_report_id', saved.id)
       await loadWorkspace()
       setNotice(`Laporan baru "${name}" berhasil dibuat (Save As).`)
@@ -1189,7 +1876,8 @@ function App() {
     })
   }
 
-  async function selectReport(report: Report, serverList: Server[] = servers) {
+  async function selectReport(report: Report | SharedReport, serverList: Server[] = servers) {
+    pushBuilderSnapshotImmediate()
     setRelationModal(null)
     const availableServers = serverList.length ? serverList : servers
     const targetAllowed = availableServers.some(server => server.id === report.definition.target)
@@ -1205,11 +1893,120 @@ function App() {
     if (!targetAllowed) setNotice('Server pada laporan ini tidak tersedia untuk akun Anda. Pilih server yang diizinkan sebelum menjalankan.')
     setActiveReport(report.id); setTab('builder')
     setReportName(report.name)
+    setActiveSharedPermission('permission' in report ? report.permission : 'owner')
     localStorage.setItem('lumina_active_report_id', report.id)
     setFieldText({}); setStructureFields({}); setStructureKeys({}); setStructureText({})
     setData({ columns: [], rows: [] }); setBaseData({ columns: [], rows: [] }); setVisibleColumns(presentation?.visibleColumns || [])
     try { setVariants(await api<typeof variants>(`/reports/${report.id}/variants`)) }
     catch (e) { setError(message(e)) }
+  }
+
+  async function openShareModal(report: Report) {
+    setShareModal({
+      open: true,
+      report,
+      shares: [],
+      loading: true,
+      targetUsername: '',
+      permission: 'view',
+      saving: false,
+      error: '',
+    })
+    try {
+      const [sharesRes, usersRes] = await Promise.all([
+        api<ReportShareItem[]>(`/reports/${encodeURIComponent(report.id)}/shares`),
+        api<AvailableUser[]>('/users'),
+      ])
+      setShareModal(prev => ({
+        ...prev,
+        shares: sharesRes,
+        loading: false,
+      }))
+      setAvailableUsers(usersRes)
+    } catch (e) {
+      setShareModal(prev => ({
+        ...prev,
+        loading: false,
+        error: message(e),
+      }))
+    }
+  }
+
+  async function handleAddShare() {
+    if (!shareModal.report) return
+    const username = shareModal.targetUsername.trim()
+    if (!username) {
+      setShareModal(prev => ({ ...prev, error: 'Pilih atau masukkan username penerima.' }))
+      return
+    }
+    setShareModal(prev => ({ ...prev, saving: true, error: '' }))
+    try {
+      await post<ReportShareItem>(`/reports/${encodeURIComponent(shareModal.report.id)}/shares`, {
+        username,
+        permission: shareModal.permission,
+      })
+      const sharesRes = await api<ReportShareItem[]>(`/reports/${encodeURIComponent(shareModal.report.id)}/shares`)
+      setShareModal(prev => ({
+        ...prev,
+        shares: sharesRes,
+        targetUsername: '',
+        saving: false,
+      }))
+      pushToast({
+        type: 'success',
+        title: 'Berhasil Membagikan',
+        message: `Laporan dibagikan ke ${username} dengan hak ${shareModal.permission === 'edit' ? 'Edit' : 'View'}.`,
+      })
+    } catch (e) {
+      setShareModal(prev => ({ ...prev, saving: false, error: message(e) }))
+    }
+  }
+
+  async function handleRemoveShare(shareId: string, username: string) {
+    if (!shareModal.report) return
+    setShareModal(prev => ({ ...prev, saving: true, error: '' }))
+    try {
+      await api(`/reports/${encodeURIComponent(shareModal.report.id)}/shares/${encodeURIComponent(shareId)}`, {
+        method: 'DELETE',
+      })
+      const sharesRes = await api<ReportShareItem[]>(`/reports/${encodeURIComponent(shareModal.report.id)}/shares`)
+      setShareModal(prev => ({
+        ...prev,
+        shares: sharesRes,
+        saving: false,
+      }))
+      pushToast({
+        type: 'info',
+        title: 'Akses Dicabut',
+        message: `Akses sharing untuk ${username} telah dicabut.`,
+      })
+    } catch (e) {
+      setShareModal(prev => ({ ...prev, saving: false, error: message(e) }))
+    }
+  }
+
+  async function handleUpdateSharePermission(share: ReportShareItem, newPermission: 'view' | 'edit') {
+    if (!shareModal.report || share.permission === newPermission) return
+    setShareModal(prev => ({ ...prev, saving: true, error: '' }))
+    try {
+      await post<ReportShareItem>(`/reports/${encodeURIComponent(shareModal.report.id)}/shares`, {
+        username: share.shared_with_username,
+        permission: newPermission,
+      })
+      const sharesRes = await api<ReportShareItem[]>(`/reports/${encodeURIComponent(shareModal.report.id)}/shares`)
+      setShareModal(prev => ({
+        ...prev,
+        shares: sharesRes,
+        saving: false,
+      }))
+      pushToast({
+        type: 'success',
+        title: 'Hak Akses Diperbarui',
+        message: `Hak akses ${share.shared_with_username} diubah menjadi ${newPermission === 'edit' ? 'Edit' : 'View'}.`,
+      })
+    } catch (e) {
+      setShareModal(prev => ({ ...prev, saving: false, error: message(e) }))
+    }
   }
 
   async function saveVariant() {
@@ -1698,16 +2495,44 @@ function App() {
           <button className="report-item-btn" onClick={() => selectReport(r)} title={r.name}>
             <Table2 size={15} /><span>{r.name}</span>
           </button>
-          <button
-            className="icon-button delete-report-btn"
-            title={`Hapus "${r.name}"`}
-            onClick={e => { e.stopPropagation(); deleteReport(r.id, r.name) }}
-          >
-            <Trash2 size={13} />
-          </button>
+          <div className="report-item-actions">
+            <button
+              className="icon-button share-report-btn"
+              title={`Bagikan "${r.name}"`}
+              onClick={e => { e.stopPropagation(); openShareModal(r) }}
+            >
+              <Share2 size={13} />
+            </button>
+            <button
+              className="icon-button delete-report-btn"
+              title={`Hapus "${r.name}"`}
+              onClick={e => { e.stopPropagation(); deleteReport(r.id, r.name) }}
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
         </div>
       ))}
       {!reports.length && <p>Belum ada laporan.</p>}</div>
+
+      <div className="sidebar-label saved-label shared-label">LAPORAN DIBAGIKAN <span>{sharedReports.length}</span></div>
+      <div className="report-list shared-report-list">
+        {sharedReports.map(sr => (
+          <div key={sr.id} className={`report-item shared ${activeReport === sr.id ? 'selected' : ''}`}>
+            <button className="report-item-btn" onClick={() => selectReport(sr)} title={`${sr.name} (dibagikan oleh ${sr.shared_by})`}>
+              <Users size={14} />
+              <div className="shared-report-text">
+                <span>{sr.name}</span>
+                <small>oleh {sr.shared_by}</small>
+              </div>
+            </button>
+            <span className={`permission-badge ${sr.permission}`} title={sr.permission === 'edit' ? 'Hak Akses: Edit' : 'Hak Akses: View Only'}>
+              {sr.permission === 'edit' ? 'Edit' : 'View'}
+            </span>
+          </div>
+        ))}
+        {!sharedReports.length && <p className="empty-shared-text">Belum ada laporan dibagikan.</p>}
+      </div>
       <div className="sidebar-bottom"><div className="user-avatar">{(user.username || user.email || 'U')[0].toUpperCase()}</div>
         <div className="user-info"><strong>{user.username || user.email}</strong><small>{user.roles?.[0] || 'User'}</small></div>
         <button className="icon-button" title="Keluar" onClick={confirmLogout}><LogOut size={17} /></button></div>
@@ -1767,8 +2592,37 @@ function App() {
         {tab === 'builder' && <>
           <div className="page-heading"><div><span className="eyebrow">REPORT DESIGNER</span><h1>Query Builder</h1>
             <p>Susun sumber data SAP, hubungkan tabel, lalu lihat hasilnya.</p></div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button className="button subtle" onClick={resetWorkspace} title="Bersihkan canvas & mulai query baru"><Plus size={16} /> Query Baru</button>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button className="button subtle" onClick={() => resetWorkspace(true)} title="Bersihkan canvas & mulai query baru"><Plus size={16} /> Query Baru</button>
+              <div className="undo-redo-btn-group" title="Undo / Redo (Ctrl+Z / Ctrl+Y)">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={handleUndo}
+                  disabled={builderHistoryPast.length === 0}
+                  title={builderHistoryPast.length > 0 ? `Undo perubahan terakhir (Ctrl+Z) · ${builderHistoryPast.length} langkah` : 'Tidak ada perubahan untuk di-undo'}
+                >
+                  <RotateCcw size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={handleRedo}
+                  disabled={builderHistoryFuture.length === 0}
+                  title={builderHistoryFuture.length > 0 ? `Redo perubahan (Ctrl+Y) · ${builderHistoryFuture.length} langkah` : 'Tidak ada perubahan untuk di-redo'}
+                >
+                  <RotateCw size={15} />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="button subtle ai-trigger-btn"
+                onClick={() => openAiAssistant('builder')}
+                title="Buka Asisten AI untuk menyusun tabel, join, kolom hitung, & pivot otomatis"
+              >
+                <Sparkles size={15} />
+                <span>Asisten AI</span>
+              </button>
               {query.sources.some(source => source.filters.length > 0) && (
                 <button
                   className="button subtle"
@@ -1795,15 +2649,24 @@ function App() {
               <label>
                 {activeReport ? (
                   <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span>EDIT LAPORAN</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span>{activeSharedPermission === 'view' ? 'LAPORAN DIBAGIKAN' : activeSharedPermission === 'edit' ? 'EDIT LAPORAN BERSAMA' : 'EDIT LAPORAN'}</span>
+                      {activeSharedPermission === 'view' && <span className="permission-chip view">👁️ View Only</span>}
+                      {activeSharedPermission === 'edit' && <span className="permission-chip edit">✏️ Akses Edit</span>}
+                    </span>
                     <button type="button" className="text-button" style={{ fontSize: '10px', padding: 0 }}
-                      onClick={() => { setActiveReport(''); setReportName('') }} title="Lepas dari laporan ini untuk membuat draf baru">✕ Draf baru</button>
+                      onClick={() => { setActiveReport(''); setReportName(''); setActiveSharedPermission('owner') }} title="Lepas dari laporan ini untuk membuat draf baru">✕ Draf baru</button>
                   </span>
                 ) : 'SIMPAN LAPORAN'}
               </label>
               <div className="inline-control">
                 <input placeholder="Nama laporan" value={reportName} onChange={e => setReportName(e.target.value)} />
-                <button className="button primary" onClick={saveReport} title={activeReport ? "Perbarui laporan ini (replace)" : "Simpan laporan"}>
+                <button
+                  className="button primary"
+                  onClick={saveReport}
+                  disabled={busy || activeSharedPermission === 'view'}
+                  title={activeSharedPermission === 'view' ? "Laporan ini read-only. Gunakan 'Simpan Baru' untuk menduplikasi ke laporan Anda." : activeReport ? "Perbarui laporan ini (replace)" : "Simpan laporan"}
+                >
                   <Save size={15} /> Simpan
                 </button>
                 {activeReport && (
@@ -1837,7 +2700,9 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {renderSourceForms()}
+                <div className="source-forms-container">
+                  {renderSourceForms()}
+                </div>
               </section>
             )}
             <section className={`card canvas-card ${isCanvasFullscreen ? 'is-fullscreen' : ''}`}>
@@ -1854,6 +2719,40 @@ function App() {
                 <div className="canvas-head-actions">
                   {!isCanvasFullscreen && (
                     <span className="tiny-pill">Geser latar · Tarik header tabel · Hubungkan field</span>
+                  )}
+                  {isCanvasFullscreen && (
+                    <>
+                      <div className="undo-redo-btn-group" title="Undo / Redo (Ctrl+Z / Ctrl+Y)">
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={handleUndo}
+                          disabled={builderHistoryPast.length === 0}
+                          title={builderHistoryPast.length > 0 ? `Undo (Ctrl+Z) · ${builderHistoryPast.length} langkah` : 'Tidak ada perubahan untuk di-undo'}
+                        >
+                          <RotateCcw size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={handleRedo}
+                          disabled={builderHistoryFuture.length === 0}
+                          title={builderHistoryFuture.length > 0 ? `Redo (Ctrl+Y) · ${builderHistoryFuture.length} langkah` : 'Tidak ada perubahan untuk di-redo'}
+                        >
+                          <RotateCw size={14} />
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="button subtle ai-trigger-btn"
+                        style={{ height: '32px', padding: '0 10px', fontSize: '11px', gap: '5px' }}
+                        onClick={() => openAiAssistant('builder')}
+                        title="Buka Asisten AI untuk menyusun query & canvas otomatis"
+                      >
+                        <Sparkles size={14} />
+                        <span>Asisten AI</span>
+                      </button>
+                    </>
                   )}
                   {(sourcesCollapsed || isCanvasFullscreen) && (
                     <button
@@ -2216,7 +3115,36 @@ function App() {
         </>}
         {tab === 'compare' && <><div className="page-heading"><div><span className="eyebrow">DATA QUALITY</span><h1>Bandingkan Data</h1>
           <p>Temukan perbedaan data tabel yang sama di dua server SAP. Simpan parameter perbandingan sebagai variant untuk digunakan kembali.</p></div>
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="undo-redo-btn-group" title="Undo / Redo (Ctrl+Z / Ctrl+Y)">
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleUndo}
+                disabled={compareHistoryPast.length === 0}
+                title={compareHistoryPast.length > 0 ? `Undo perbandingan terakhir (Ctrl+Z) · ${compareHistoryPast.length} langkah` : 'Tidak ada perubahan untuk di-undo'}
+              >
+                <RotateCcw size={15} />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleRedo}
+                disabled={compareHistoryFuture.length === 0}
+                title={compareHistoryFuture.length > 0 ? `Redo perbandingan (Ctrl+Y) · ${compareHistoryFuture.length} langkah` : 'Tidak ada perubahan untuk di-redo'}
+              >
+                <RotateCw size={15} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className="button subtle ai-trigger-btn"
+              onClick={() => openAiAssistant('compare')}
+              title="Buka Asisten AI untuk menentukan target server, tabel, dan filter perbandingan otomatis"
+            >
+              <Sparkles size={15} />
+              <span>Asisten AI</span>
+            </button>
             {compareFilters.length > 0 && (
               <button
                 className="button subtle"
@@ -3491,10 +4419,18 @@ function App() {
             </small>
             {query.sources.flatMap((source, sourceIndex) => [...new Set(source.filters.map(filter => filter.field))].map(field => {
               const meta = metadataFor(source).find(item => item.name === field)
+              const fieldProps = getFieldInputProps(meta, field)
               return (
                 <div className="parameter-group" key={`${source.alias}-${field}`}>
                   <div className="parameter-group-head">
-                    <strong>{source.table_name}.{field}</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexWrap: 'wrap' }}>
+                      <strong>{source.table_name}.{field}</strong>
+                      {fieldProps.typeLabel && (
+                        <span className="field-type-pill" title={`Tipe SAP: ${fieldProps.typeLabel}`}>
+                          {fieldProps.typeLabel}
+                        </span>
+                      )}
+                    </div>
                     {meta?.description && <small>{meta.description}</small>}
                     <button className="text-button" disabled={busy} onClick={() => openSelectionDialog(sourceIndex, field)}>
                       <Columns3 size={14} /> Pilihan ganda
@@ -3515,23 +4451,67 @@ function App() {
                         <option value="LT">Kurang dari</option>
                         <option value="LE">≤</option>
                       </select>
-                      <input
-                        aria-label="Nilai awal"
-                        disabled={busy}
-                        placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
-                        value={filter.value}
-                        onChange={e => updateFilter(sourceIndex, filterIndex, { value: e.target.value })}
-                      />
+                      {fieldProps.isDate ? (
+                        <input
+                          type="date"
+                          aria-label="Nilai awal tanggal"
+                          disabled={busy}
+                          value={toIsoDate(filter.value)}
+                          onChange={e => updateFilter(sourceIndex, filterIndex, { value: toDisplayDate(e.target.value) })}
+                          title={filter.value ? `Tanggal: ${filter.value}` : 'Pilih tanggal'}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          inputMode={fieldProps.isNumeric ? 'numeric' : 'text'}
+                          maxLength={fieldProps.maxLength}
+                          aria-label="Nilai awal"
+                          disabled={busy}
+                          placeholder={filter.operator === 'BT' ? (fieldProps.maxLength ? `Dari (Maks. ${fieldProps.maxLength})` : 'Dari') : (fieldProps.maxLength ? `Nilai (Maks. ${fieldProps.maxLength})` : 'Nilai')}
+                          value={filter.value}
+                          onChange={e => {
+                            let val = e.target.value
+                            if (fieldProps.isPureNumber) {
+                              val = val.replace(/\D/g, '')
+                            } else if (fieldProps.isNumeric) {
+                              val = val.replace(/[^0-9.,-]/g, '')
+                            }
+                            updateFilter(sourceIndex, filterIndex, { value: val })
+                          }}
+                        />
+                      )}
                       {filter.operator === 'BT' && (
                         <>
                           <span className="parameter-range-separator">sampai</span>
-                          <input
-                            aria-label="Nilai akhir"
-                            disabled={busy}
-                            placeholder="Sampai"
-                            value={filter.high_value || ''}
-                            onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: e.target.value })}
-                          />
+                          {fieldProps.isDate ? (
+                            <input
+                              type="date"
+                              aria-label="Nilai akhir tanggal"
+                              disabled={busy}
+                              value={toIsoDate(filter.high_value || '')}
+                              onChange={e => updateFilter(sourceIndex, filterIndex, { high_value: toDisplayDate(e.target.value) })}
+                              title={filter.high_value ? `Tanggal akhir: ${filter.high_value}` : 'Pilih tanggal akhir'}
+                            />
+                          ) : (
+                            <input
+                              type="text"
+                              inputMode={fieldProps.isNumeric ? 'numeric' : 'text'}
+                              maxLength={fieldProps.maxLength}
+                              aria-label="Nilai akhir"
+                              disabled={busy}
+                              placeholder={fieldProps.maxLength ? `Sampai (Maks. ${fieldProps.maxLength})` : 'Sampai'}
+                              value={filter.high_value || ''}
+                              onChange={e => {
+                                let val = e.target.value
+                                if (fieldProps.isPureNumber) {
+                                  val = val.replace(/\D/g, '')
+                                } else if (fieldProps.isNumeric) {
+                                  val = val.replace(/[^0-9.,-]/g, '')
+                                }
+                                updateFilter(sourceIndex, filterIndex, { high_value: val })
+                              }}
+                            />
+                          )}
                         </>
                       )}
                       <button
@@ -3613,10 +4593,18 @@ function App() {
             </small>
             {[...new Set(compareFilters.map(filter => filter.field))].map(field => {
               const meta = compareMetadata.find(item => item.name === field)
+              const fieldProps = getFieldInputProps(meta, field)
               return (
                 <div className="parameter-group" key={`compare-${field}`}>
                   <div className="parameter-group-head">
-                    <strong>{compareTable}.{field}</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexWrap: 'wrap' }}>
+                      <strong>{compareTable}.{field}</strong>
+                      {fieldProps.typeLabel && (
+                        <span className="field-type-pill" title={`Tipe SAP: ${fieldProps.typeLabel}`}>
+                          {fieldProps.typeLabel}
+                        </span>
+                      )}
+                    </div>
                     {meta?.description && <small>{meta.description}</small>}
                     <button className="text-button" disabled={busy} onClick={() => openSelectionDialog(null, field, 'compare', compareTable)}>
                       <Columns3 size={14} /> Pilihan ganda
@@ -3647,23 +4635,67 @@ function App() {
                         <option value="LT">Kurang dari</option>
                         <option value="LE">≤</option>
                       </select>
-                      <input
-                        aria-label="Nilai awal"
-                        disabled={busy}
-                        placeholder={filter.operator === 'BT' ? 'Dari' : 'Nilai'}
-                        value={filter.value}
-                        onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, value: e.target.value } : item))}
-                      />
+                      {fieldProps.isDate ? (
+                        <input
+                          type="date"
+                          aria-label="Nilai awal tanggal"
+                          disabled={busy}
+                          value={toIsoDate(filter.value)}
+                          onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, value: toDisplayDate(e.target.value) } : item))}
+                          title={filter.value ? `Tanggal: ${filter.value}` : 'Pilih tanggal'}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          inputMode={fieldProps.isNumeric ? 'numeric' : 'text'}
+                          maxLength={fieldProps.maxLength}
+                          aria-label="Nilai awal"
+                          disabled={busy}
+                          placeholder={filter.operator === 'BT' ? (fieldProps.maxLength ? `Dari (Maks. ${fieldProps.maxLength})` : 'Dari') : (fieldProps.maxLength ? `Nilai (Maks. ${fieldProps.maxLength})` : 'Nilai')}
+                          value={filter.value}
+                          onChange={e => {
+                            let val = e.target.value
+                            if (fieldProps.isPureNumber) {
+                              val = val.replace(/\D/g, '')
+                            } else if (fieldProps.isNumeric) {
+                              val = val.replace(/[^0-9.,-]/g, '')
+                            }
+                            setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, value: val } : item))
+                          }}
+                        />
+                      )}
                       {filter.operator === 'BT' && (
                         <>
                           <span className="parameter-range-separator">sampai</span>
-                          <input
-                            aria-label="Nilai akhir"
-                            disabled={busy}
-                            placeholder="Sampai"
-                            value={filter.high_value || ''}
-                            onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, high_value: e.target.value } : item))}
-                          />
+                          {fieldProps.isDate ? (
+                            <input
+                              type="date"
+                              aria-label="Nilai akhir tanggal"
+                              disabled={busy}
+                              value={toIsoDate(filter.high_value || '')}
+                              onChange={e => setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, high_value: toDisplayDate(e.target.value) } : item))}
+                              title={filter.high_value ? `Tanggal akhir: ${filter.high_value}` : 'Pilih tanggal akhir'}
+                            />
+                          ) : (
+                            <input
+                              type="text"
+                              inputMode={fieldProps.isNumeric ? 'numeric' : 'text'}
+                              maxLength={fieldProps.maxLength}
+                              aria-label="Nilai akhir"
+                              disabled={busy}
+                              placeholder={fieldProps.maxLength ? `Sampai (Maks. ${fieldProps.maxLength})` : 'Sampai'}
+                              value={filter.high_value || ''}
+                              onChange={e => {
+                                let val = e.target.value
+                                if (fieldProps.isPureNumber) {
+                                  val = val.replace(/\D/g, '')
+                                } else if (fieldProps.isNumeric) {
+                                  val = val.replace(/[^0-9.,-]/g, '')
+                                }
+                                setCompareFilters(current => current.map((item, i) => i === filterIndex ? { ...item, high_value: val } : item))
+                              }}
+                            />
+                          )}
                         </>
                       )}
                       <button
@@ -3737,6 +4769,625 @@ function App() {
           ] as [SelectionTab, string][]).map(([tab, label]) => <button key={tab} className={selectionDialog.tab === tab ? 'active' : ''} onClick={() => setSelectionDialog(current => current && { ...current, tab })}>{label}<span>{selectionDialog.entries[tab].split(/\r?\n/).filter(line => line.trim()).length}</span></button>)}</div>
           <div className="selection-modal-body"><p>{selectionDialog.tab.endsWith('ranges') ? 'Satu interval per baris. Pisahkan nilai awal dan akhir dengan Tab, titik koma, atau koma.' : 'Tempel nomor batch dari Excel atau ketik satu nomor per baris. Koma dan Tab juga diterima.'}</p><textarea autoFocus spellCheck={false} placeholder={selectionDialog.tab.endsWith('ranges') ? '0000000001;0000000010\n0000000020;0000000030' : '0000366399\n0000366400\n0000366401'} value={selectionDialog.entries[selectionDialog.tab]} onChange={event => setSelectionDialog(current => current && { ...current, entries: { ...current.entries, [current.tab]: event.target.value } })} /><small>Maksimal 30 pilihan per tabel. Nomor dengan nol di depan tetap sebagai teks.</small></div>
           <div className="selection-modal-actions"><button className="button subtle" onClick={() => setSelectionDialog(null)}>Batal</button><button className="button primary" onClick={saveSelectionDialog}>Terapkan pilihan</button></div>
+        </div>
+      </div>
+    )}
+    {shareModal.open && shareModal.report && (
+      <div className="modal-backdrop" onClick={() => !shareModal.saving && setShareModal(prev => ({ ...prev, open: false }))}>
+        <div className="modal-card share-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal-head">
+            <div className="modal-title">
+              <span className="modal-title-icon blue"><Share2 size={18} /></span>
+              <span>Bagikan Laporan · {shareModal.report.name}</span>
+            </div>
+            <button
+              className="icon-button"
+              title="Tutup"
+              disabled={shareModal.saving}
+              onClick={() => setShareModal(prev => ({ ...prev, open: false }))}
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="share-modal-body">
+            {shareModal.error && (
+              <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
+                {shareModal.error}
+              </div>
+            )}
+
+            {/* Form Tambah Share */}
+            <div className="share-target-form">
+              <span style={{ fontSize: '11px', fontWeight: 700, color: '#334d6e' }}>
+                Pilih Pengguna & Hak Akses
+              </span>
+              <div className="share-input-row">
+                <div className="share-user-picker" ref={shareDropdownRef}>
+                  <div
+                    className={`share-picker-control ${shareUserDropdownOpen ? 'open' : ''}`}
+                    onClick={() => setShareUserDropdownOpen(!shareUserDropdownOpen)}
+                  >
+                    <Search size={15} className="share-picker-search-icon" />
+                    <input
+                      type="text"
+                      className="share-picker-input"
+                      placeholder="Cari atau pilih username tujuan…"
+                      value={shareModal.targetUsername}
+                      onChange={e => {
+                        setShareModal(prev => ({ ...prev, targetUsername: e.target.value, error: '' }))
+                        setShareUserDropdownOpen(true)
+                      }}
+                      onFocus={() => setShareUserDropdownOpen(true)}
+                      disabled={shareModal.saving}
+                    />
+                    {shareModal.targetUsername && (
+                      <button
+                        type="button"
+                        className="share-picker-clear"
+                        onClick={e => {
+                          e.stopPropagation()
+                          setShareModal(prev => ({ ...prev, targetUsername: '', error: '' }))
+                        }}
+                        title="Hapus pilihan"
+                      >
+                        <X size={13} />
+                      </button>
+                    )}
+                    <span className="share-picker-chevron">
+                      {shareUserDropdownOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                    </span>
+                  </div>
+
+                  {shareUserDropdownOpen && (
+                    <div className="share-dropdown-menu">
+                      <div className="share-dropdown-list">
+                        {availableUsers
+                          .filter(u => {
+                            const term = shareModal.targetUsername.trim().toLowerCase()
+                            if (!term) return true
+                            return (
+                              u.username.toLowerCase().includes(term) ||
+                              (u.name && u.name.toLowerCase().includes(term)) ||
+                              (u.role && u.role.toLowerCase().includes(term))
+                            )
+                          })
+                          .map(u => {
+                            const isSelected = shareModal.targetUsername === u.username
+                            return (
+                              <div
+                                key={u.username}
+                                className={`share-dropdown-item ${isSelected ? 'selected' : ''}`}
+                                onClick={() => {
+                                  setShareModal(prev => ({ ...prev, targetUsername: u.username, error: '' }))
+                                  setShareUserDropdownOpen(false)
+                                }}
+                              >
+                                <div className="share-item-avatar">
+                                  {(u.username || 'U')[0].toUpperCase()}
+                                </div>
+                                <div className="share-item-content">
+                                  <div className="share-item-top">
+                                    <strong className="share-item-username">{u.username}</strong>
+                                    {u.role && <span className="share-item-role">{u.role}</span>}
+                                  </div>
+                                  {u.name && <span className="share-item-name">{u.name}</span>}
+                                </div>
+                                {isSelected && <CheckCircle2 size={15} className="share-item-check" />}
+                              </div>
+                            )
+                          })}
+                        {availableUsers.filter(u => {
+                          const term = shareModal.targetUsername.trim().toLowerCase()
+                          if (!term) return true
+                          return (
+                            u.username.toLowerCase().includes(term) ||
+                            (u.name && u.name.toLowerCase().includes(term)) ||
+                            (u.role && u.role.toLowerCase().includes(term))
+                          )
+                        }).length === 0 && (
+                          <div className="share-dropdown-empty">
+                            <span>Tidak ditemukan pengguna yang cocok.</span>
+                            {shareModal.targetUsername && (
+                              <button
+                                type="button"
+                                className="text-button"
+                                style={{ marginTop: '4px', fontSize: '11px' }}
+                                onClick={() => setShareUserDropdownOpen(false)}
+                              >
+                                Gunakan &quot;{shareModal.targetUsername}&quot;
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  className="button primary"
+                  disabled={shareModal.saving || !shareModal.targetUsername.trim()}
+                  onClick={() => {
+                    setShareUserDropdownOpen(false)
+                    handleAddShare()
+                  }}
+                  style={{ height: '40px', padding: '0 16px', gap: '6px' }}
+                >
+                  {shareModal.saving ? <span className="spinner" /> : <UserPlus size={15} />}
+                  <span>Bagikan</span>
+                </button>
+              </div>
+
+              <div className="share-permission-selector">
+                <div
+                  className={`share-permission-card ${shareModal.permission === 'view' ? 'active' : ''}`}
+                  onClick={() => !shareModal.saving && setShareModal(prev => ({ ...prev, permission: 'view' }))}
+                >
+                  <div className="share-perm-radio-circle">
+                    {shareModal.permission === 'view' && <div className="share-perm-radio-dot" />}
+                  </div>
+                  <div className="share-perm-icon blue">
+                    <Eye size={16} />
+                  </div>
+                  <div className="share-perm-text">
+                    <div className="share-perm-title">Lihat Saja (View)</div>
+                    <div className="share-perm-desc">Pengguna hanya dapat melihat dan mengeksekusi data laporan</div>
+                  </div>
+                </div>
+
+                <div
+                  className={`share-permission-card ${shareModal.permission === 'edit' ? 'active' : ''}`}
+                  onClick={() => !shareModal.saving && setShareModal(prev => ({ ...prev, permission: 'edit' }))}
+                >
+                  <div className="share-perm-radio-circle">
+                    {shareModal.permission === 'edit' && <div className="share-perm-radio-dot" />}
+                  </div>
+                  <div className="share-perm-icon green">
+                    <Edit2 size={16} />
+                  </div>
+                  <div className="share-perm-text">
+                    <div className="share-perm-title">Dapat Edit (Edit)</div>
+                    <div className="share-perm-desc">Pengguna dapat mengubah konfigurasi query & menyimpan laporan</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Daftar Pengguna yang Sudah Diberi Akses */}
+            <div className="share-active-list">
+              <div className="share-active-header">
+                Pengguna yang Memiliki Akses ({shareModal.shares.length})
+              </div>
+              {shareModal.loading ? (
+                <div style={{ textAlign: 'center', padding: '16px', color: '#889cb5', fontSize: '12px' }}>
+                  <span className="spinner" style={{ display: 'inline-block', marginRight: '6px' }} /> Memuat daftar akses…
+                </div>
+              ) : shareModal.shares.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '16px', color: '#90a4bc', fontSize: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px dashed #e2e8f0' }}>
+                  Belum ada pengguna lain yang memiliki akses ke laporan ini.
+                </div>
+              ) : (
+                shareModal.shares.map(s => (
+                  <div key={s.id} className="share-user-row">
+                    <div className="share-user-meta">
+                      <div className="share-user-avatar">
+                        {(s.shared_with_username || 'U')[0].toUpperCase()}
+                      </div>
+                      <div className="share-user-name">
+                        {s.shared_with_username}
+                      </div>
+                    </div>
+                    <div className="share-user-actions">
+                      <select
+                        className="share-permission-select"
+                        value={s.permission}
+                        disabled={shareModal.saving}
+                        onChange={e => handleUpdateSharePermission(s, e.target.value as 'view' | 'edit')}
+                        aria-label={`Hak akses untuk ${s.shared_with_username}`}
+                      >
+                        <option value="view">View (Lihat)</option>
+                        <option value="edit">Edit (Ubah)</option>
+                      </select>
+                      <button
+                        className="icon-button delete-report-btn"
+                        title={`Cabut akses ${s.shared_with_username}`}
+                        disabled={shareModal.saving}
+                        onClick={() => handleRemoveShare(s.id, s.shared_with_username)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="modal-actions">
+            <button
+              className="button primary"
+              onClick={() => setShareModal(prev => ({ ...prev, open: false }))}
+            >
+              Selesai
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    {aiModalOpen && (
+      <div className="modal-backdrop ai-modal-backdrop" onClick={() => setAiModalOpen(false)}>
+        <div className="modal-card ai-modal" onClick={e => e.stopPropagation()}>
+          <div className="ai-modal-header">
+            <div className="ai-modal-title-wrap">
+              <span className="ai-title-icon"><Sparkles size={20} /></span>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className="ai-modal-title">Asisten AI Lumina</span>
+                  <span className="ai-context-badge">
+                    {aiContextMode === 'builder' ? 'Query Builder & Pipeline' : 'Bandingkan Data'}
+                  </span>
+                </div>
+                <p className="ai-modal-subtitle">
+                  {aiContextMode === 'builder'
+                    ? 'Rancang tabel SAP, relasi (join), filter, rumus hitung, dan pivot otomatis.'
+                    : 'Tentukan server target SAP, tabel pembanding, dan filter perbandingan otomatis.'}
+                </p>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div className="ai-provider-status-group">
+                <div
+                  className={`ai-provider-pill ${aiProviderStatus?.primary?.online ? 'online' : aiProviderStatus?.primary?.configured ? 'configured' : 'offline'}`}
+                  title={`Primary: 9Router (${aiProviderStatus?.primary?.model || 'ABAP-Git'}) - ${aiProviderStatus?.primary?.online ? 'Online' : 'Offline / Standby'}`}
+                >
+                  <span className="status-indicator-dot" />
+                  <span>9Router (Primary)</span>
+                </div>
+                <div
+                  className={`ai-provider-pill ${aiProviderStatus?.fallback?.online ? 'online' : aiProviderStatus?.fallback?.configured ? 'configured' : 'offline'}`}
+                  title={`Fallback: OpenRouter (${aiProviderStatus?.fallback?.model || 'openrouter/auto'}) - ${aiProviderStatus?.fallback?.online ? 'Online' : aiProviderStatus?.fallback?.configured ? 'Siap' : 'Belum Dikonfigurasi'}`}
+                >
+                  <span className="status-indicator-dot cloud" />
+                  <span>OpenRouter (Cloud)</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setAiModalOpen(false)}
+                title="Tutup (Esc)"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+
+          <div className="ai-modal-body">
+            <div className="ai-mode-tabs">
+              <button
+                type="button"
+                className={`ai-mode-tab ${aiContextMode === 'builder' ? 'active' : ''}`}
+                onClick={() => { setAiContextMode('builder'); setAiResult(null); setAiError('') }}
+              >
+                <Table2 size={14} /> Mode Query Builder (Tabel, Join, Rumus, Pivot)
+              </button>
+              <button
+                type="button"
+                className={`ai-mode-tab ${aiContextMode === 'compare' ? 'active' : ''}`}
+                onClick={() => { setAiContextMode('compare'); setAiResult(null); setAiError('') }}
+              >
+                <GitCompareArrows size={14} /> Mode Bandingkan Data (2 Server SAP)
+              </button>
+            </div>
+
+            <div className="ai-prompt-suggestions-wrap">
+              <span className="ai-suggestions-label">Contoh Instruksi Cepat:</span>
+              <div className="ai-quick-prompts">
+                {aiContextMode === 'builder' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Tampilkan penjualan dari tabel VBAK dan VBAP tahun 2025 dengan relasi VBELN, filter mata uang WAERK EQ "IDR", tambahkan kolom hitung TOTAL_GROSS = ([T2.KWMENG] * [T2.NETPR]) * 1.11, dan buat pivot nilai per bulan ERDAT')}
+                    >
+                      📈 Sales Order (VBAK + VBAP) & Pivot Nilai
+                    </button>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Daftar material dari MARA join dengan data plant MARC berdasarkan MATNR, pilih kolom MATNR, MAKTX, WERKS, EKGRP, filter MTART EQ "FERT"')}
+                    >
+                      📦 Master Material (MARA + MARC)
+                    </button>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Analisis Purchase Order dari EKKO dan EKPO, hubungkan EBELN, hitung nilai NETWR_TOTAL = [T2.MENGE] * [T2.NETPR], dan kelompokkan pivot per Vendor LIFNR')}
+                    >
+                      🛒 Purchase Order (EKKO + EKPO)
+                    </button>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Tabel karakteristik batch AUSP join CABN berdasarkan ATINN, filter objek batch dan buat pivot karakteristik ATWRT')}
+                    >
+                      🔬 Karakteristik Batch (AUSP + CABN)
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Bandingkan data master material pada tabel MARA antara server DEV dan PRD untuk 200 baris pertama')}
+                    >
+                      🔍 Bandingkan Tabel MARA
+                    </button>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Bandingkan tabel Sales Order VBAK antara dua server dengan filter tahun ERDAT EQ 2025')}
+                    >
+                      📑 Bandingkan Dokumen Sales VBAK
+                    </button>
+                    <button
+                      type="button"
+                      className="ai-prompt-chip"
+                      onClick={() => setAiPrompt('Bandingkan master vendor LFA1 antara dua server dengan filter LAND1 EQ "ID"')}
+                    >
+                      🏢 Bandingkan Vendor LFA1
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="ai-input-container">
+              <textarea
+                className="ai-textarea"
+                value={aiPrompt}
+                onChange={e => setAiPrompt(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault()
+                    runAiAssistant()
+                  }
+                }}
+                placeholder={aiContextMode === 'builder'
+                  ? 'Tuliskan kebutuhan laporan SAP Anda di sini (misal: "Buatkan analisis penjualan VBAK dan VBAP tahun 2025, hitung subtotal kotor dengan pajak 11%, lalu pivot berdasarkan customer dan tanggal")...'
+                  : 'Tuliskan perbandingan yang diinginkan (misal: "Bandingkan tabel MARA antara server DEV dan PRD dengan limit 150 baris")...'
+                }
+                rows={3}
+              />
+              <div className="ai-input-footer">
+                <span className="ai-shortcut-hint">
+                  Tekan <kbd>Ctrl</kbd> + <kbd>Enter</kbd> untuk memproses cepat
+                </span>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {aiPrompt && (
+                    <button
+                      type="button"
+                      className="button subtle"
+                      style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
+                      onClick={() => { setAiPrompt(''); setAiResult(null); setAiError('') }}
+                      disabled={aiLoading}
+                    >
+                      Bersihkan
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={runAiAssistant}
+                    disabled={aiLoading || !aiPrompt.trim()}
+                  >
+                    {aiLoading ? (
+                      <>
+                        <span className="spinner" style={{ width: '14px', height: '14px' }} />
+                        <span>Memproses ({aiProgress}%)…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={14} />
+                        <span>Rancang dengan AI</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {aiError && (
+              <div className="alert error" style={{ margin: '8px 0', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <AlertTriangle size={16} />
+                <span>{aiError}</span>
+              </div>
+            )}
+
+            {aiLoading && (
+              <div className="ai-loading-card">
+                <div className="ai-loading-header">
+                  <div className="ai-loading-title-row">
+                    <span className="spinner" style={{ width: '16px', height: '16px', borderColor: '#2563eb', borderTopColor: 'transparent', flex: 'none' }} />
+                    <strong style={{ fontSize: '13px', color: '#0f172a' }}>
+                      {aiProgressStage || 'Asisten AI sedang menyusun rancangan…'}
+                    </strong>
+                  </div>
+                  <span className="ai-progress-badge">
+                    {aiProgress}%
+                  </span>
+                </div>
+
+                <div className="ai-progress-track">
+                  <div
+                    className="ai-progress-bar"
+                    style={{ width: `${aiProgress}%` }}
+                  />
+                </div>
+
+                <div className="ai-loading-footer">
+                  <span className="ai-loading-hint">
+                    Penyedia: <strong>{aiProviderStatus?.primary?.online ? '9Router Local Proxy' : 'OpenRouter Cloud'}</strong>
+                  </span>
+                  <span className="ai-loading-hint">
+                    {aiContextMode === 'builder' ? 'Menyusun tabel, relasi join, filter, kalkulasi, & pivot' : 'Menyusun server pembanding & filter perbandingan'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {aiResult && !aiLoading && (
+              <div className="ai-result-preview">
+                <div className="ai-result-meta-bar">
+                  <span className="ai-provider-used-badge">
+                    <Sparkles size={13} /> Dihasilkan oleh: <strong>{aiResult.provider}</strong>
+                  </span>
+                  <span className="ai-ready-badge">
+                    <CheckCircle2 size={13} /> Rancangan Siap Diterapkan ke Workspace
+                  </span>
+                </div>
+
+                {aiResult.explanation && (
+                  <div className="ai-explanation-box">
+                    <div style={{ fontWeight: 700, fontSize: '11px', marginBottom: '3px', color: '#1e3a8a', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <BookOpen size={13} /> Penjelasan Rancangan AI:
+                    </div>
+                    <div style={{ whiteSpace: 'pre-line' }}>{aiResult.explanation}</div>
+                  </div>
+                )}
+
+                {aiContextMode === 'builder' && (
+                  <div className="ai-components-grid">
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <Database size={14} style={{ color: '#2563eb' }} />
+                        <span>Tabel Sumber ({aiResult.data.sources?.length || 0})</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        {aiResult.data.sources?.map((s, i) => (
+                          <div key={i} className="ai-preview-item">
+                            <span className="ai-tag">{s.alias}</span>
+                            <strong>{s.table_name}</strong>
+                            <span className="ai-meta-text">
+                              ({s.fields?.length || 0} kolom{s.filters?.length ? `, ${s.filters.length} filter` : ''})
+                            </span>
+                          </div>
+                        )) || <span style={{ color: '#94a3b8' }}>Tidak ada tabel</span>}
+                      </div>
+                    </div>
+
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <Layers3 size={14} style={{ color: '#7c3aed' }} />
+                        <span>Relasi / Join ({aiResult.data.joins?.length || 0})</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        {aiResult.data.joins?.length ? aiResult.data.joins.map((j, i) => (
+                          <div key={i} className="ai-preview-item">
+                            <span className="ai-tag">{j.left_alias}</span>
+                            <span>⟷</span>
+                            <span className="ai-tag">{j.right_alias}</span>
+                            <small style={{ color: '#64748b' }}>({j.how || 'left'})</small>
+                          </div>
+                        )) : <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>Tunggal / Tanpa relasi</span>}
+                      </div>
+                    </div>
+
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <Columns3 size={14} style={{ color: '#0891b2' }} />
+                        <span>Kolom Hitung ({aiResult.data.calculatedColumns?.length || 0})</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        {aiResult.data.calculatedColumns?.length ? aiResult.data.calculatedColumns.map((c, i) => (
+                          <div key={i} className="ai-preview-item-calc">
+                            <strong>{c.name}</strong>
+                            <code>{c.expression || (c.fields ? `${c.operation}(${c.fields.join(', ')})` : '')}</code>
+                          </div>
+                        )) : <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>Tidak ada kolom hitung</span>}
+                      </div>
+                    </div>
+
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <BarChart3 size={14} style={{ color: '#ea580c' }} />
+                        <span>Pivot Table</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        {aiResult.data.pivot ? (
+                          <div className="ai-pivot-summary">
+                            <div><small>Baris:</small> {Array.isArray(aiResult.data.pivot.rows) ? aiResult.data.pivot.rows.join(', ') : aiResult.data.pivot.rows}</div>
+                            <div><small>Kolom:</small> {aiResult.data.pivot.column}</div>
+                            <div><small>Nilai:</small> {aiResult.data.pivot.value} ({aiResult.data.pivot.aggregation || 'first'})</div>
+                          </div>
+                        ) : (
+                          <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>Tidak ada pivot (Tabel Standar)</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {aiContextMode === 'compare' && (
+                  <div className="ai-components-grid">
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <Database size={14} style={{ color: '#2563eb' }} />
+                        <span>Tabel Perbandingan</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        <strong>{aiResult.data.table_name || '-'}</strong>
+                      </div>
+                    </div>
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <GitCompareArrows size={14} style={{ color: '#7c3aed' }} />
+                        <span>Server SAP</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        <div><small>Sumber 1:</small> <strong>{aiResult.data.target || '-'}</strong></div>
+                        <div><small>Sumber 2:</small> <strong>{aiResult.data.other_target || '-'}</strong></div>
+                      </div>
+                    </div>
+                    <div className="ai-component-card">
+                      <div className="ai-component-card-title">
+                        <Filter size={14} style={{ color: '#0891b2' }} />
+                        <span>Filter ({aiResult.data.filters?.length || 0})</span>
+                      </div>
+                      <div className="ai-component-card-body">
+                        {aiResult.data.filters?.length ? aiResult.data.filters.map((f, i) => (
+                          <div key={i} className="ai-preview-item">
+                            <strong>{f.field}</strong> {f.operator} "{f.value}"
+                          </div>
+                        )) : <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>Tanpa filter</span>}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="modal-actions ai-modal-actions">
+            <button
+              type="button"
+              className="button subtle"
+              onClick={() => setAiModalOpen(false)}
+            >
+              Tutup
+            </button>
+            {aiResult && (
+              <button
+                type="button"
+                className="button primary ai-apply-button"
+                onClick={() => applyAiResult()}
+              >
+                <CheckCircle2 size={16} />
+                <span>Terapkan ke Workspace</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     )}

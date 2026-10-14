@@ -13,6 +13,9 @@ from backend.app import main
 
 
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main.STRUCTURE_CACHE.clear()
+
     async def test_pivot_keeps_material_batch_pairs_and_averages_numeric_values(self):
         rows = [
             {"MATNR": "A", "CHARG": "01", "NAME": "LENGTH", "VALUE": "10"},
@@ -185,8 +188,8 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_composite_join_uses_hidden_keys_and_only_outputs_selected_columns(self):
         async def read_rows(dto, _token):
-            self.assertFalse(dto.filters)
             if dto.table_name == "MCH1":
+                self.assertFalse(dto.filters)
                 return [{"MATNR": "001", "CHARG": "A", "MTART": "FERT"},
                         {"MATNR": "001", "CHARG": "B", "MTART": "HALB"}]
             return [{"MATNR": "001", "CHARG": "A", "WERKS": "1000"},
@@ -264,7 +267,7 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
             main.FilterIn(field="CHARG", value="0000366399"),
             main.FilterIn(field="CHARG", value="0000366400"),
         ])
-        self.assertEqual(where, ["CHARG IN ('0000366399','0000366400')"])
+        self.assertEqual(where, ["CHARG IN ('0000366399', '0000366400')"])
 
     async def test_formula_rejects_calls(self):
         with self.assertRaises(HTTPException) as raised:

@@ -85,6 +85,19 @@ class ReportSchedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ReportShare(Base):
+    __tablename__ = "report_shares"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    report_id: Mapped[str] = mapped_column(String(36), index=True)
+    shared_by_id: Mapped[str] = mapped_column(String(255), index=True)
+    shared_by_username: Mapped[str] = mapped_column(String(160), default="")
+    shared_with_username: Mapped[str] = mapped_column(String(160), index=True)
+    shared_with_user_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    permission: Mapped[str] = mapped_column(String(20), default="view")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -97,6 +110,21 @@ def init_db() -> None:
     with engine.begin() as conn:
         conn.execute(text(f'ALTER TABLE "{settings.database_schema}".report_runs ADD COLUMN IF NOT EXISTS artifact BYTEA'))
         conn.execute(text(f'ALTER TABLE "{settings.database_schema}".report_schedules DROP COLUMN IF EXISTS chat_id'))
+        conn.execute(text(f'''
+            CREATE TABLE IF NOT EXISTS "{settings.database_schema}".report_shares (
+                id VARCHAR(36) PRIMARY KEY,
+                report_id VARCHAR(36) NOT NULL,
+                shared_by_id VARCHAR(255) NOT NULL,
+                shared_by_username VARCHAR(160) NOT NULL DEFAULT '',
+                shared_with_username VARCHAR(160) NOT NULL,
+                shared_with_user_id VARCHAR(255),
+                permission VARCHAR(20) NOT NULL DEFAULT 'view',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        '''))
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_report_shares_report_id ON "{settings.database_schema}".report_shares (report_id)'))
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS idx_report_shares_shared_with ON "{settings.database_schema}".report_shares (shared_with_username)'))
 
 
 def get_db():

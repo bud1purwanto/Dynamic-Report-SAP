@@ -10,7 +10,7 @@ import secrets
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -23,12 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, Variant, get_db, init_db, utcnow
+from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, ReportShare, Variant, get_db, init_db, utcnow
 
 
 app = FastAPI(title="Lumina Dynamic Report", version="0.1.0")
@@ -206,6 +206,11 @@ class ReportIn(BaseModel):
     definition: dict[str, Any]
 
 
+class ReportShareIn(BaseModel):
+    username: str = Field(min_length=1, max_length=160)
+    permission: Literal["view", "edit"] = "view"
+
+
 class VariantIn(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     layout: dict[str, Any]
@@ -225,6 +230,12 @@ class ExportIn(BaseModel):
 class AiDraftIn(BaseModel):
     prompt: str = Field(min_length=5, max_length=2000)
     current_query: QueryIn | None = None
+
+
+class AiFullAssistantIn(BaseModel):
+    prompt: str = Field(min_length=3, max_length=3000)
+    context_type: Literal["builder", "compare"] = "builder"
+    current_state: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScheduleIn(BaseModel):
@@ -481,6 +492,10 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
             if IDENT.fullmatch(name):
                 position_value = next((field.get(k) for k in ("position", "POSITION", "field_position", "fieldPosition")
                                        if field.get(k) is not None), None)
+                length_value = next((field.get(k) for k in ("length", "LENG", "output_length", "OUTPUTLEN", "intlen", "INTLEN", "field_length")
+                                     if field.get(k) is not None), None)
+                decimals_value = next((field.get(k) for k in ("decimals", "DECIMALS", "dec")
+                                       if field.get(k) is not None), None)
                 fields.append({
                     "name": name.upper(),
                     "is_key": bool(field.get("is_key") or field.get("key") or field.get("KEYFLAG") == "X"),
@@ -488,6 +503,8 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
                     "description": str(next((field.get(k) for k in ("description", "DESCRIPTION", "field_description", "FIELD_DESCRIPTION", "fieldDescription", "field_text", "FIELD_TEXT", "fieldText", "FIELDTEXT", "DDTEXT", "SCRTEXT_L", "scrtext_l", "REPTEXT", "reptext", "label", "text") if field.get(k)), "")),
                     "check_table": str(field.get("check_table") or field.get("CHECKTABLE") or ""),
                     "position": int(position_value) if str(position_value).strip().isdigit() else None,
+                    "length": int(length_value) if str(length_value).strip().isdigit() else None,
+                    "decimals": int(decimals_value) if str(decimals_value).strip().isdigit() else None,
                 })
         if fields:
             return fields, text_body
@@ -499,6 +516,8 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
         if name_index >= 0:
             fields = []
             position_index = next((i for i, h in enumerate(headers) if h in ("position", "pos")), -1)
+            len_index = next((i for i, h in enumerate(headers) if h in ("length", "leng", "len", "output length", "outputlen")), -1)
+            dec_index = next((i for i, h in enumerate(headers) if h in ("decimals", "dec")), -1)
             for line in lines[2:]:
                 cells = [cell.strip() for cell in line.strip("|").split("|")]
                 if len(cells) <= name_index:
@@ -514,6 +533,8 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
                         "description": next((cells[i] for i, h in enumerate(headers) if h in ("description", "field description", "field text", "label", "text", "ddtext") and i < len(cells)), ""),
                         "check_table": "",
                         "position": int(cells[position_index]) if position_index >= 0 and position_index < len(cells) and cells[position_index].isdigit() else None,
+                        "length": int(cells[len_index]) if len_index >= 0 and len_index < len(cells) and cells[len_index].isdigit() else None,
+                        "decimals": int(cells[dec_index]) if dec_index >= 0 and dec_index < len(cells) and cells[dec_index].isdigit() else None,
                     })
             if fields:
                 return fields, text_body
@@ -540,17 +561,34 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
         return fields, raw
     ddic_rows: list[dict[str, Any]] = []
     needs_description = any(not field.get("description") for field in fields)
-    if not all(isinstance(field.get("position"), int) and field["position"] > 0 for field in fields) or needs_description:
+    needs_enrichment = (
+        not all(isinstance(field.get("position"), int) and field["position"] > 0 for field in fields)
+        or any(not field.get("data_type") or field.get("data_type") == "CHAR" or field.get("length") is None for field in fields)
+        or needs_description
+    )
+    if needs_enrichment:
         try:
             ddic_rows = await read_rows(ReadIn(
-                target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION", "ROLLNAME"],
+                target=str(target["id"]), table_name="DD03L", fields=["FIELDNAME", "POSITION", "ROLLNAME", "DATATYPE", "LENG", "OUTPUTLEN", "DECIMALS"],
                 filters=[FilterIn(field="TABNAME", value=table_upper),
                          FilterIn(field="AS4LOCAL", value="A")], rowcount=1000,
             ), token)
-            by_name = {str(row.get("FIELDNAME", "")).upper(): int(str(row["POSITION"]).strip())
-                       for row in ddic_rows if str(row.get("POSITION", "")).strip().isdigit()}
+            by_name = {str(row.get("FIELDNAME", "")).upper(): row for row in ddic_rows}
             for field in fields:
-                field["position"] = field.get("position") or by_name.get(field["name"])
+                info = by_name.get(field["name"])
+                if info:
+                    if (field.get("position") is None or field.get("position") == 0) and str(info.get("POSITION", "")).strip().isdigit():
+                        field["position"] = int(str(info["POSITION"]).strip())
+                    if info.get("DATATYPE"):
+                        field["data_type"] = str(info["DATATYPE"]).strip()
+                    if field.get("length") is None:
+                        out_len = str(info.get("OUTPUTLEN") or info.get("LENG") or "").strip()
+                        if out_len.isdigit():
+                            field["length"] = int(out_len)
+                    if field.get("decimals") is None:
+                        dec_len = str(info.get("DECIMALS") or "").strip()
+                        if dec_len.isdigit():
+                            field["decimals"] = int(dec_len)
         except (HTTPException, ValueError, KeyError):
             pass
     if needs_description:
@@ -576,31 +614,55 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
             rollnames.get(field["name"], "") for field in fields if not field.get("description")
             and IDENT.fullmatch(rollnames.get(field["name"], ""))))
         if missing_rollnames:
-            texts_by_rollname: dict[str, str] = {}
-            # Query DD04T in batches of up to 25 items using IN clause instead of 1-by-1
-            for offset in range(0, len(missing_rollnames), 25):
-                batch = missing_rollnames[offset:offset + 25]
+            async def read_element_text(rollname: str) -> tuple[str, str]:
                 try:
-                    filters_dd04t = [
-                        FilterIn(field="ROLLNAME", operator="EQ", value=r) for r in batch
-                    ] + [FilterIn(field="DDLANGUAGE", operator="EQ", value="E")]
                     rows = await read_rows(ReadIn(
-                        target=str(target["id"]), table_name="DD04T", fields=["ROLLNAME", "DDTEXT"],
-                        filters=filters_dd04t, rowcount=len(batch) * 2,
+                        target=str(target["id"]), table_name="DD04T", fields=["DDTEXT"],
+                        filters=[FilterIn(field="ROLLNAME", value=rollname),
+                                 FilterIn(field="DDLANGUAGE", value="E")], rowcount=1,
                     ), token)
-                    for r in rows:
-                        rname = str(r.get("ROLLNAME", "")).upper()
-                        rtext = str(r.get("DDTEXT", "")).strip()
-                        if rname and rtext and rname not in texts_by_rollname:
-                            texts_by_rollname[rname] = rtext
+                    return rollname, str(rows[0].get("DDTEXT", "")).strip() if rows else ""
                 except (HTTPException, ValueError, KeyError):
-                    pass
+                    return rollname, ""
+            texts_by_rollname: dict[str, str] = {}
+            for offset in range(0, len(missing_rollnames), 6):
+                texts_by_rollname.update(await asyncio.gather(
+                    *(read_element_text(name) for name in missing_rollnames[offset:offset + 6])))
             for field in fields:
                 field["description"] = field.get("description") or texts_by_rollname.get(rollnames.get(field["name"], ""), "")
     fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))
     # Cache for 1 hour (3600 seconds)
     STRUCTURE_CACHE[cache_key] = (time.monotonic() + 3600, ([dict(f) for f in fields], raw))
     return fields, raw
+
+
+def normalize_sap_filter_value(val: str, field_name: str) -> str:
+    s = val.strip()
+    if not s:
+        return s
+    is_date_field = (
+        field_name.endswith("DAT")
+        or field_name.endswith("DATE")
+        or field_name.endswith("DT")
+        or field_name in ("DATUM", "CPUDT", "ERDAT", "AEDAT", "FKDAT", "BLDAT", "BUDAT", "BEDAT", "AUDAT", "WADAT", "LFDAT")
+    )
+    if is_date_field:
+        if re.fullmatch(r"\d{8}", s):
+            return s
+        m_ymd = re.fullmatch(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})", s)
+        if m_ymd:
+            return f"{m_ymd.group(1)}{int(m_ymd.group(2)):02d}{int(m_ymd.group(3)):02d}"
+        m_dmy = re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{4})", s)
+        if m_dmy:
+            p1, p2, yr = int(m_dmy.group(1)), int(m_dmy.group(2)), m_dmy.group(3)
+            if p1 > 12:
+                day, month = p1, p2
+            elif p2 > 12:
+                month, day = p1, p2
+            else:
+                day, month = p1, p2
+            return f"{yr}{month:02d}{day:02d}"
+    return s
 
 
 def build_sap_where(filters: list[FilterIn]) -> list[str]:
@@ -613,7 +675,7 @@ def build_sap_where(filters: list[FilterIn]) -> list[str]:
         if not item.value.strip():
             continue
         field = item.field.upper()
-        low = item.value.replace("'", "''")
+        low = normalize_sap_filter_value(item.value, field).replace("'", "''")
         if item.operator == "EQ" and item.sign == "I":
             include_equals.setdefault(field, []).append(low)
             grouped.setdefault(field, {"I": [], "E": []})
@@ -621,7 +683,7 @@ def build_sap_where(filters: list[FilterIn]) -> list[str]:
         if item.operator == "BT":
             if not item.high_value.strip():
                 raise HTTPException(422, f"Isi nilai akhir interval {field}.")
-            high = item.high_value.replace("'", "''")
+            high = normalize_sap_filter_value(item.high_value, field).replace("'", "''")
             condition = f"({field} >= '{low}' AND {field} <= '{high}')"
         else:
             condition = f"{field} {operators[item.operator]} '{low}'"
@@ -652,10 +714,15 @@ def build_sap_where(filters: list[FilterIn]) -> list[str]:
     for char in expression:
         if char == "'":
             quoted = not quoted
-        if char == " " and not quoted:
+            token += char
+        elif not quoted and char == " ":
             if token:
                 words.append(token)
                 token = ""
+        elif not quoted and char == ",":
+            token += char
+            words.append(token)
+            token = ""
         else:
             token += char
     if token:
@@ -663,6 +730,8 @@ def build_sap_where(filters: list[FilterIn]) -> list[str]:
     lines: list[str] = []
     line = ""
     for word in words:
+        if len(word) > 72:
+            raise HTTPException(422, f"Nilai filter SAP terlalu panjang ({len(word)} karakter).")
         candidate = f"{line} {word}" if line else word
         if len(candidate) > 72:
             if not line:
@@ -1107,13 +1176,28 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
     return {"columns": output_columns, "rows": rows, "warnings": warnings}
 
 
+def check_report_share_access(db: Session, report_id: str, user_id: str, username: str) -> ReportShare | None:
+    user_cond = []
+    if user_id:
+        user_cond.append(ReportShare.shared_with_user_id == user_id)
+    if username:
+        user_cond.append(func.lower(ReportShare.shared_with_username) == username.lower())
+    if not user_cond:
+        return None
+    return db.scalars(
+        select(ReportShare).where(ReportShare.report_id == report_id, or_(*user_cond))
+    ).first()
+
+
 @app.post("/api/sap/query")
 async def run_query(dto: QueryIn, auth: tuple[AppSession, str] = Depends(get_token),
                     db: Session = Depends(get_db)):
     report_id = dto.report_id
     if report_id:
         report = db.get(Report, report_id)
-        if not report or report.owner_id != auth[0].user_id:
+        current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+        has_share = check_report_share_access(db, report_id, auth[0].user_id, current_username) if report else None
+        if not report or (report.owner_id != auth[0].user_id and not has_share):
             report_id = None
     try:
         result = await execute_query(dto, auth[1])
@@ -1128,68 +1212,147 @@ async def run_query(dto: QueryIn, auth: tuple[AppSession, str] = Depends(get_tok
     return result
 
 
+from .ai_service import check_ai_providers_status, query_llm_with_fallback
+
+
 @app.get("/api/ai/status")
 async def ai_status(auth: tuple[AppSession, str] = Depends(get_token)):
+    return await check_ai_providers_status()
+
+
+@app.post("/api/ai/generate")
+async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Depends(get_token)):
+    resources = await user_catalog(auth[1])
+    allowed_targets = [r["id"] for r in resources]
+    if not allowed_targets:
+        raise HTTPException(422, "Tidak ada target SAP yang tersedia untuk akun Anda.")
+
+    if dto.context_type == "compare":
+        system_prompt = (
+            "Anda adalah AI Assistant SAP Expert Lumina untuk fitur Bandingkan Data. "
+            "Tugas Anda adalah menganalisis permintaan pengguna dan menghasilkan konfigurasi perbandingan dalam JSON. "
+            "Kembalikan HANYA format JSON valid tanpa markdown/backticks:\n"
+            "{\n"
+            '  "explanation": "Penjelasan singkat analisis Anda",\n'
+            '  "target": "target_id_sumber",\n'
+            '  "other_target": "target_id_pembanding",\n'
+            '  "table_name": "NAMA_TABEL_SAP",\n'
+            '  "rowcount": 100,\n'
+            '  "filters": [\n'
+            '    {"field": "FIELDNAME", "operator": "EQ|BT|NE|GT|GE|LT|LE", "value": "val1", "high_value": "val2", "sign": "I|E"}\n'
+            "  ]\n"
+            "}\n"
+            "Aturan:\n"
+            "1. target dan other_target HARUS dipilih dari daftar server yang diizinkan dan harus berbeda.\n"
+            "2. table_name harus nama tabel SAP valid (huruf kapital, misal MARA, VBAK, EKKO, AUSP).\n"
+        )
+        user_prompt = json.dumps({
+            "request": dto.prompt,
+            "allowed_servers": [{"id": r["id"], "label": r.get("label")} for r in resources],
+            "current_state": dto.current_state,
+        }, ensure_ascii=False)
+    else:
+        system_prompt = (
+            "Anda adalah AI Assistant SAP Data Architect Lumina untuk Query Builder & Report Generator. "
+            "Tugas Anda: dari instruksi pengguna, susun konfigurasi laporan lengkap secara presisi. "
+            "Format balasan HARUS JSON murni tanpa markdown/backticks:\n"
+            "{\n"
+            '  "explanation": "Penjelasan singkat arsitektur query dan langkah yang diambil",\n'
+            '  "target": "target_id",\n'
+            '  "rowcount": 100,\n'
+            '  "sources": [\n'
+            '    {\n'
+            '      "alias": "T1",\n'
+            '      "table_name": "NAMA_TABEL",\n'
+            '      "fields": ["FIELD1", "FIELD2"],\n'
+            '      "filters": [{"field": "FIELD1", "operator": "EQ", "value": "VAL", "high_value": "", "sign": "I"}]\n'
+            '    }\n'
+            '  ],\n'
+            '  "joins": [\n'
+            '    {\n'
+            '      "left_alias": "T1",\n'
+            '      "right_alias": "T2",\n'
+            '      "how": "left|inner",\n'
+            '      "conditions": [{"left_field": "KEY1", "right_field": "KEY1"}]\n'
+            '    }\n'
+            '  ],\n'
+            '  "calculatedColumns": [\n'
+            '    {\n'
+            '      "name": "NAMA_KOLOM",\n'
+            '      "operation": "custom",\n'
+            '      "expression": "([T1.FIELD1] * [T2.FIELD2]) / 1000"\n'
+            '    }\n'
+            '  ],\n'
+            '  "pivot": {\n'
+            '    "rows": ["T1.FIELD1"],\n'
+            '    "column": "T2.FIELD_CHAR",\n'
+            '    "value": "T2.ATWRT",\n'
+            '    "fallback_value": "T2.ATFLV",\n'
+            '    "aggregation": "first|sum|mean|min|max|count"\n'
+            '  }\n'
+            "}\n"
+            "Aturan Sangat Penting:\n"
+            "1. PERIKSA current_state (workspace aktif pengguna). Pengguna bekerja pada workspace yang sedang aktif. "
+            "Jika workspace saat ini sudah memiliki tabel/sumber data, PERTAHANKAN dan PERBARUI (merge) sesuai instruksi pengguna (misalnya menambahkan filter baru, menambahkan tabel, atau menambah rumus). "
+            "Jangan menghapus tabel atau kolom yang sudah ada kecuali pengguna secara eksplisit meminta 'buat baru', 'ganti semua', atau 'reset'.\n"
+            "2. Gunakan target server dari current_state.target (kecuali jika pengguna meminta server lain dari daftar allowed_servers).\n"
+            "3. Jika pengguna memasukkan kode atau klausa ABAP SQL (seperti ALIAS~FIELD EQ/IN ... atau WHERE ...), parse alias dan field tersebut. "
+            "Petakan ke tabel SAP standar yang sesuai (misalnya C -> AUFK, O -> AFKO, OI -> AFPO, B -> MCHB/MSEG/VBAP) atau gunakan tabel yang sudah ada di workspace, dan tambahkan field-field tersebut ke filters.\n"
+            "4. Jika pengguna tidak meminta pivot, set \"pivot\": null.\n"
+            "5. Jika tidak ada kolom hitung, set \"calculatedColumns\": [].\n"
+            "6. Jika ada join antara T1 dan T2, conditions HARUS menghubungkan field key yang tepat (misal MATNR ke MATNR, VBELN ke VBELN, AUFNR ke AUFNR).\n"
+            "7. Kolom expression pada calculatedColumns harus menggunakan tanda kurung siku [ALIAS.FIELD] atau [KOLOM].\n"
+            "8. Nilai target harus dari daftar allowed_servers.\n"
+        )
+        user_prompt = json.dumps({
+            "request": dto.prompt,
+            "allowed_servers": [{"id": r["id"], "label": r.get("label")} for r in resources],
+            "current_state": dto.current_state,
+        }, ensure_ascii=False)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            res = await client.get(f"{settings.ollama_base_url}/api/tags")
-        res.raise_for_status()
-        available = [item.get("name") for item in res.json().get("models", [])]
-        return {"available": settings.ollama_model in available,
-                "model": settings.ollama_model}
-    except (httpx.HTTPError, ValueError):
-        return {"available": False, "model": settings.ollama_model}
+        raw_content, provider_used = await query_llm_with_fallback(messages)
+    except Exception as exc:
+        raise HTTPException(502, f"Gagal memanggil penyedia AI: {exc}") from None
+
+    # Clean potential markdown wrapping ```json ... ```
+    cleaned = raw_content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, f"Respons AI dari {provider_used} bukan JSON valid: {exc}\nIsi:\n{cleaned[:300]}") from None
+
+    explanation = str(data.get("explanation", ""))
+    return {
+        "provider": provider_used,
+        "explanation": explanation,
+        "data": data,
+    }
 
 
 @app.post("/api/ai/draft-query")
 async def ai_draft_query(dto: AiDraftIn, auth: tuple[AppSession, str] = Depends(get_token)):
-    resources = await user_catalog(auth[1])
-    allowed_targets = [r["id"] for r in resources]
-    if not allowed_targets:
-        raise HTTPException(422, "Tidak ada target SAP yang tersedia.")
-    context = dto.current_query.model_dump() if dto.current_query else {
-        "target": allowed_targets[0], "sources": [], "joins": [], "rowcount": 100}
-    system = (
-        "Buat draf query SAP, balas JSON saja: "
-        "{target,sources:[{alias,table_name,fields,filters:[{field,operator,value}]}],"
-        "joins:[{left_alias,left_field,right_alias,right_field,how}],rowcount,explanation}. "
-        "Maksimal 3 sources; target harus dari daftar. Jangan mengarang field. "
-        "Draf tidak dieksekusi."
+    # Backward compatibility redirect to ai_generate
+    res = await ai_generate(
+        AiFullAssistantIn(prompt=dto.prompt, context_type="builder", current_state=dto.current_query.model_dump() if dto.current_query else {}),
+        auth,
     )
-    user_message = json.dumps({
-        "request": dto.prompt,
-        "allowed_targets": [{"id": r["id"], "label": r.get("label")} for r in resources],
-        "current_query": context,
-    }, ensure_ascii=False)
-    try:
-        async with httpx.AsyncClient(timeout=300) as client:
-            res = await client.post(f"{settings.ollama_base_url}/api/chat", json={
-                "model": settings.ollama_model,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.1, "num_predict": 350, "num_ctx": 2048},
-                "messages": [{"role": "system", "content": system},
-                             {"role": "user", "content": user_message}],
-            })
-        res.raise_for_status()
-        content = res.json()["message"]["content"].strip()
-        draft = json.loads(content)
-        explanation = str(draft.pop("explanation", ""))[:1000]
-        query = QueryIn.model_validate(draft)
-    except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-        raise HTTPException(502, f"Model lokal gagal membuat draf valid: {str(exc)[:200]}") from None
-    if query.target not in allowed_targets:
-        raise HTTPException(422, "Draf AI memilih target yang tidak diizinkan.")
-    aliases = [s.alias for s in query.sources]
-    if len(set(aliases)) != len(aliases) or len(query.joins) != len(query.sources) - 1:
-        raise HTTPException(422, "Draf AI memiliki relasi tabel yang tidak valid.")
-    for source in query.sources:
-        if not IDENT.fullmatch(source.alias) or not IDENT.fullmatch(source.table_name) or any(
-            not IDENT.fullmatch(field) for field in source.fields
-        ):
-            raise HTTPException(422, "Draf AI berisi nama tabel atau field yang tidak valid.")
-    return {"query": query.model_dump(), "explanation": explanation,
-            "requires_review": True}
+    return {
+        "query": res["data"],
+        "explanation": res["explanation"],
+        "provider": res["provider"],
+        "requires_review": True,
+    }
 
 
 @app.post("/api/data/pivot")
@@ -1299,7 +1462,12 @@ def run_formula_rows(rows: list[dict[str, Any]], name: str, expression: str, col
         clean_expr = clean_expr.replace(f"[{col}]", f"v{i}")
     try:
         tree = ast.parse(clean_expr, mode="eval")
-    except SyntaxError as exc:
+        dummy_vals = {f"v{i}": 1.0 for i in range(len(referenced))}
+        try:
+            evaluate_formula(tree, dummy_vals)
+        except ZeroDivisionError:
+            pass
+    except (SyntaxError, ValueError, TypeError) as exc:
         raise HTTPException(422, f"Format rumus matematika tidak valid: {exc}") from None
     output = []
     for row in rows:
@@ -1505,6 +1673,211 @@ async def list_reports(auth: tuple[AppSession, str] = Depends(get_token), db: Se
     return [{"id": r.id, "name": r.name, "definition": r.definition} for r in rows]
 
 
+@app.get("/api/reports/shared")
+async def list_shared_reports(auth: tuple[AppSession, str] = Depends(get_token), db: Session = Depends(get_db)):
+    current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+    user_cond = []
+    if auth[0].user_id:
+        user_cond.append(ReportShare.shared_with_user_id == auth[0].user_id)
+    if current_username:
+        user_cond.append(func.lower(ReportShare.shared_with_username) == current_username.lower())
+    if not user_cond:
+        return []
+
+    shares = db.scalars(
+        select(ReportShare)
+        .where(or_(*user_cond))
+        .order_by(ReportShare.created_at.desc())
+    ).all()
+    if not shares:
+        return []
+
+    report_ids = list({s.report_id for s in shares})
+    reports = db.scalars(select(Report).where(Report.id.in_(report_ids))).all()
+    report_map = {r.id: r for r in reports}
+
+    owner_ids = list({r.owner_id for r in reports})
+    owner_sessions = db.scalars(select(AppSession).where(AppSession.user_id.in_(owner_ids))).all()
+    owner_map = {}
+    for s in owner_sessions:
+        if isinstance(s.user_profile, dict) and s.user_profile.get("username"):
+            owner_map[s.user_id] = s.user_profile["username"]
+
+    result = []
+    seen = set()
+    for s in shares:
+        r = report_map.get(s.report_id)
+        if not r or r.id in seen:
+            continue
+        seen.add(r.id)
+        shared_by = s.shared_by_username or owner_map.get(r.owner_id) or "Pengguna Lain"
+        result.append({
+            "id": r.id,
+            "name": r.name,
+            "definition": r.definition,
+            "permission": s.permission,
+            "shared_by": shared_by,
+            "share_id": s.id,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else "",
+        })
+    return result
+
+
+@app.get("/api/users")
+async def list_available_users(auth: tuple[AppSession, str] = Depends(get_token), db: Session = Depends(get_db)):
+    current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip().upper()
+    users_dict: dict[str, dict[str, Any]] = {}
+
+    try:
+        sessions = db.scalars(select(AppSession)).all()
+        for s in sessions:
+            if isinstance(s.user_profile, dict):
+                u_name = (s.user_profile.get("username") or "").strip()
+                if u_name:
+                    u_key = u_name.upper()
+                    if u_key != current_username:
+                        users_dict[u_key] = {
+                            "username": u_name,
+                            "name": s.user_profile.get("name") or s.user_profile.get("email") or u_name,
+                            "role": s.user_profile.get("role") or "User"
+                        }
+    except Exception:
+        pass
+
+    try:
+        rows = db.execute(text("SELECT username, full_name, role FROM ai_assistant_dev.users")).fetchall()
+        for r in rows:
+            u_name = (r[0] or "").strip()
+            if u_name:
+                u_key = u_name.upper()
+                if u_key != current_username and u_key not in users_dict:
+                    users_dict[u_key] = {
+                        "username": u_name,
+                        "name": r[1] or u_name,
+                        "role": r[2] or "User"
+                    }
+    except Exception:
+        pass
+
+    default_trst_users = [
+        {"username": "TRST-BUDI", "name": "Budi Purwanto", "role": "ABAP Consultant"},
+        {"username": "TRSTDEV", "name": "TRST Developer", "role": "Superadmin"},
+        {"username": "TRST-FIRGI", "name": "Firgi Sotya", "role": "Backend Developer"},
+        {"username": "TRST-WILLIAM", "name": "William Febrian", "role": "ABAP Developer"},
+        {"username": "TRST-NIA", "name": "Fillia Agnia", "role": "Data Analyst"},
+        {"username": "TRST-WAFI", "name": "Wafi Makarim", "role": "SAP Functional"},
+        {"username": "TRST-FANY", "name": "Fany", "role": "ABAP Developer"},
+        {"username": "TRST-SUGIK", "name": "Sugik", "role": "Basis Consultant"},
+        {"username": "TRST-INT", "name": "Internal IT", "role": "Administrator"},
+    ]
+    for d in default_trst_users:
+        u_key = d["username"].upper()
+        if u_key != current_username and u_key not in users_dict:
+            users_dict[u_key] = d
+
+    return sorted(users_dict.values(), key=lambda x: x["username"])
+
+
+@app.get("/api/reports/{report_id}/shares")
+async def list_report_shares(report_id: str, auth: tuple[AppSession, str] = Depends(get_token),
+                             db: Session = Depends(get_db)):
+    row = db.get(Report, report_id)
+    if not row or row.owner_id != auth[0].user_id:
+        raise HTTPException(404, "Laporan tidak ditemukan atau Anda bukan pemilik laporan.")
+    shares = db.scalars(
+        select(ReportShare)
+        .where(ReportShare.report_id == report_id)
+        .order_by(ReportShare.created_at.desc())
+    ).all()
+    return [{
+        "id": s.id,
+        "report_id": s.report_id,
+        "shared_with_username": s.shared_with_username,
+        "permission": s.permission,
+        "created_at": s.created_at.isoformat() if s.created_at else "",
+        "updated_at": s.updated_at.isoformat() if s.updated_at else ""
+    } for s in shares]
+
+
+@app.post("/api/reports/{report_id}/shares")
+async def create_or_update_report_share(report_id: str, dto: ReportShareIn,
+                                       auth: tuple[AppSession, str] = Depends(get_token),
+                                       db: Session = Depends(get_db)):
+    row = db.get(Report, report_id)
+    if not row or row.owner_id != auth[0].user_id:
+        raise HTTPException(404, "Laporan tidak ditemukan atau Anda bukan pemilik laporan.")
+
+    target_username = dto.username.strip()
+    if not target_username:
+        raise HTTPException(400, "Username target tidak boleh kosong.")
+
+    current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+    if target_username.lower() == current_username.lower():
+        raise HTTPException(400, "Tidak dapat membagikan laporan ke akun sendiri.")
+
+    target_sessions = db.scalars(select(AppSession)).all()
+    target_user_id = None
+    for s in target_sessions:
+        if isinstance(s.user_profile, dict) and (s.user_profile.get("username") or "").lower() == target_username.lower():
+            target_user_id = s.user_id
+            break
+
+    existing = db.scalars(select(ReportShare).where(
+        ReportShare.report_id == report_id,
+        func.lower(ReportShare.shared_with_username) == target_username.lower()
+    )).first()
+
+    owner_username = current_username or "Owner"
+    if existing:
+        existing.permission = dto.permission
+        existing.updated_at = utcnow()
+        if target_user_id and not existing.shared_with_user_id:
+            existing.shared_with_user_id = target_user_id
+        db.commit()
+        return {
+            "id": existing.id,
+            "report_id": existing.report_id,
+            "shared_with_username": existing.shared_with_username,
+            "permission": existing.permission,
+            "created_at": existing.created_at.isoformat() if existing.created_at else "",
+            "updated_at": existing.updated_at.isoformat() if existing.updated_at else ""
+        }
+
+    new_share = ReportShare(
+        report_id=report_id,
+        shared_by_id=auth[0].user_id,
+        shared_by_username=owner_username,
+        shared_with_username=target_username,
+        shared_with_user_id=target_user_id,
+        permission=dto.permission,
+    )
+    db.add(new_share)
+    db.commit()
+    return {
+        "id": new_share.id,
+        "report_id": new_share.report_id,
+        "shared_with_username": new_share.shared_with_username,
+        "permission": new_share.permission,
+        "created_at": new_share.created_at.isoformat() if new_share.created_at else "",
+        "updated_at": new_share.updated_at.isoformat() if new_share.updated_at else ""
+    }
+
+
+@app.delete("/api/reports/{report_id}/shares/{share_id}")
+async def delete_report_share(report_id: str, share_id: str,
+                             auth: tuple[AppSession, str] = Depends(get_token),
+                             db: Session = Depends(get_db)):
+    row = db.get(Report, report_id)
+    if not row or row.owner_id != auth[0].user_id:
+        raise HTTPException(404, "Laporan tidak ditemukan atau Anda bukan pemilik laporan.")
+    share = db.get(ReportShare, share_id)
+    if not share or share.report_id != report_id:
+        raise HTTPException(404, "Data share tidak ditemukan.")
+    db.delete(share)
+    db.commit()
+    return {"success": True}
+
+
 @app.post("/api/reports")
 async def create_report(dto: ReportIn, auth: tuple[AppSession, str] = Depends(get_token),
                         db: Session = Depends(get_db)):
@@ -1519,8 +1892,15 @@ async def update_report(report_id: str, dto: ReportIn,
                         auth: tuple[AppSession, str] = Depends(get_token),
                         db: Session = Depends(get_db)):
     row = db.get(Report, report_id)
-    if not row or row.owner_id != auth[0].user_id:
+    if not row:
         raise HTTPException(404, "Laporan tidak ditemukan.")
+    if row.owner_id != auth[0].user_id:
+        current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+        share = check_report_share_access(db, report_id, auth[0].user_id, current_username)
+        if not share:
+            raise HTTPException(404, "Laporan tidak ditemukan.")
+        if share.permission != "edit":
+            raise HTTPException(403, "Anda hanya memiliki izin melihat (view) untuk laporan ini. Gunakan 'Simpan Sebagai Baru' untuk menduplikasi laporan.")
     row.name = dto.name
     row.definition = dto.definition
     db.commit()
@@ -1535,6 +1915,7 @@ async def delete_report(report_id: str, auth: tuple[AppSession, str] = Depends(g
         raise HTTPException(404, "Laporan tidak ditemukan.")
     db.query(Variant).filter(Variant.report_id == row.id, Variant.owner_id == auth[0].user_id).delete()
     db.query(ReportSchedule).filter(ReportSchedule.report_id == row.id, ReportSchedule.owner_id == auth[0].user_id).delete()
+    db.query(ReportShare).filter(ReportShare.report_id == row.id).delete()
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -1544,9 +1925,14 @@ async def delete_report(report_id: str, auth: tuple[AppSession, str] = Depends(g
 async def list_variants(report_id: str, auth: tuple[AppSession, str] = Depends(get_token),
                         db: Session = Depends(get_db)):
     row = db.get(Report, report_id)
-    if not row or row.owner_id != auth[0].user_id:
+    if not row:
         raise HTTPException(404, "Laporan tidak ditemukan.")
-    variants = db.scalars(select(Variant).where(Variant.report_id == report_id, Variant.owner_id == auth[0].user_id)).all()
+    if row.owner_id != auth[0].user_id:
+        current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
+        share = check_report_share_access(db, report_id, auth[0].user_id, current_username)
+        if not share:
+            raise HTTPException(404, "Laporan tidak ditemukan.")
+    variants = db.scalars(select(Variant).where(Variant.report_id == report_id)).all()
     return [{"id": v.id, "name": v.name, "layout": v.layout} for v in variants]
 
 
