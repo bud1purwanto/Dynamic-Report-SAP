@@ -4183,7 +4183,7 @@ function App() {
                 <button
                   className="text-button"
                   onClick={() => setPivotRows(current => [...current, ''])}
-                  disabled={pivotRows.length >= 6}
+                  disabled={pivotRows.length >= Math.max(sourceColumns.length, 30)}
                 >
                   <Plus size={14} /> Tambah field Baris
                 </button>

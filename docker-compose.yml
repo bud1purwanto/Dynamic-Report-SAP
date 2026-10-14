@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8087}:8000"
+    env_file:
+      - .env
     environment:
       APP_PORT: "8000"
       APP_HOST: "0.0.0.0"
@@ -31,6 +33,15 @@ services:
       # Optional LLM / Ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+
+      # AI LLM Providers (9Router Primary & OpenRouter Fallback)
+      NINE_ROUTER_BASE_URL: ${NINE_ROUTER_BASE_URL:-http://192.168.88.83:20128/v1}
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY:-}
+      NINE_ROUTER_MODEL: ${NINE_ROUTER_MODEL:-Lumina-Dynamic-Report}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}
+      OPENROUTER_FALLBACK_MODEL: ${OPENROUTER_FALLBACK_MODEL:-openrouter/free}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

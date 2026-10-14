@@ -1379,8 +1379,10 @@ def pivot_data(dto: PivotIn) -> dict[str, Any]:
     if dto.aggregation not in ("first", "sum", "mean", "count", "min", "max"):
         raise HTTPException(422, "Agregasi tidak didukung.")
     index_fields = [dto.index] if isinstance(dto.index, str) else dto.index
-    if not index_fields or len(index_fields) > 6 or len(set(index_fields)) != len(index_fields):
-        raise HTTPException(422, "Pilih 1–6 kolom Baris yang berbeda.")
+    if not index_fields or len(set(index_fields)) != len(index_fields):
+        raise HTTPException(422, "Pilih kolom Baris yang berbeda (tidak boleh duplikat).")
+    if len(index_fields) > 100:
+        raise HTTPException(422, "Maksimal 100 kolom Baris pivot.")
     frame = pd.DataFrame(dto.rows)
     # A saved pivot can outlive a changed report selection.  Keep any row
     # dimensions that still exist instead of failing the whole report because

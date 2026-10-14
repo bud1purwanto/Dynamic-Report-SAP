@@ -27,6 +27,20 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["rows"]), 2)
         self.assertEqual([(row["MATNR"], row["LENGTH"]) for row in result["rows"]], [("A", 15.0), ("B", 30.0)])
 
+    async def test_pivot_supports_many_row_dimensions(self):
+        # Test with 8 row dimensions (more than previous 6-column limit)
+        dimensions = [f"DIM_{i}" for i in range(1, 9)]
+        row_template = {dim: f"val_{dim}" for dim in dimensions}
+        rows = [
+            {**row_template, "NAME": "COLOR", "VALUE": "RED"},
+            {**row_template, "NAME": "WEIGHT", "VALUE": "100"},
+        ]
+        result = await main.pivot(main.PivotIn(rows=rows, index=dimensions,
+                                               columns="NAME", values="VALUE", aggregation="first"), (None, ""))
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["COLOR"], "RED")
+        self.assertEqual(result["rows"][0]["WEIGHT"], "100")
+
     async def test_calculated_column_uses_selected_fields_and_handles_division_by_zero(self):
         rows = [{"A": "10", "B": "2"}, {"A": "5", "B": "0"}]
         result = await main.calculated_column(main.CalculatedColumnIn(

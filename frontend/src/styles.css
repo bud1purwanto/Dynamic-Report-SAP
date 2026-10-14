@@ -150,11 +150,12 @@ label small{font-size:11px;color:#9ba8b7;font-weight:500}
 .parameter-group-head>.text-button{margin-left:auto;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.modal-card.selection-modal{width:min(700px,100%)}.selection-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;padding:12px 18px 0;border-bottom:1px solid #e5edf6}.selection-tabs button{display:flex;justify-content:center;align-items:center;gap:5px;padding:11px 5px;border:0;border-bottom:2px solid transparent;background:transparent;color:#6c829e;font-size:11px;font-weight:700;cursor:pointer}.selection-tabs button.active{border-color:#3973cb;color:#225aa7}.selection-tabs span{padding:2px 5px;border-radius:8px;background:#eaf1fa;font-size:9px}.selection-modal-body{padding:18px;display:grid;gap:10px}.selection-modal-body p{margin:0;color:#586f8d;font-size:11px}.selection-modal-body textarea{width:100%;min-height:230px;padding:12px;border:1px solid #cfdded;border-radius:8px;resize:vertical;font:12px/1.7 monospace;color:#25446a}.selection-modal-body small{color:#8498b1;font-size:10px}.selection-modal-actions{display:flex;justify-content:flex-end;gap:8px;padding:0 18px 18px}@media(max-width:600px){.selection-tabs{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:850px){.pivot-areas{grid-template-columns:1fr}.designer-grid{grid-template-columns:1fr}}
 .modal-card.formula-modal{width:min(620px,100%)}
-.modal-card.pivot-modal{width:min(880px,100%)}
+.modal-card.pivot-modal{width:min(900px,100%);max-height:90vh;display:flex;flex-direction:column}
 .modal-card.column-modal{width:min(680px,100%)}
 .modal-card.parameter-modal{width:min(780px,100%)}
 .formula-modal-body{padding:20px;display:grid;gap:16px}
-.pivot-modal-body{padding:20px;display:grid;gap:16px}
+.pivot-modal-body{padding:20px;display:grid;gap:16px;overflow-y:auto;max-height:calc(90vh - 125px)}
+.pivot-area:first-child{max-height:460px;overflow-y:auto}
 .column-modal-body{padding:20px;display:grid;gap:12px}
 .parameter-modal-body{padding:20px;display:grid;gap:14px;max-height:70vh;overflow-y:auto}
 .modal-backdrop.selection-backdrop{z-index:10020;background:rgba(15,28,48,.65)}
