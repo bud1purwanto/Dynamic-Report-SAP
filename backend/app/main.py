@@ -109,9 +109,6 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=6)
 
 
-class CredentialIn(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
 
 
 class FilterIn(BaseModel):
@@ -913,50 +910,6 @@ async def servers(auth: tuple[AppSession, str] = Depends(get_token)):
     return {"resources": await user_catalog(auth[1])}
 
 
-@app.get("/api/sap/credentials")
-async def credentials(auth: tuple[AppSession, str] = Depends(get_token)):
-    async with httpx.AsyncClient(timeout=10) as client:
-        res = await client.get(
-            f"{settings.oidc_issuer}/v1/mcp/sap-credentials/mine",
-            headers={"Authorization": f"Bearer {auth[1]}"},
-        )
-    fail_upstream(res, "Vault OIDC")
-    rows = res.json()
-    return [{"connectionId": r.get("connectionId"),
-             "hasCredential": bool(r.get("configured", r.get("hasCredential", False))),
-             "username": r.get("username")} for r in rows]
-
-
-@app.put("/api/sap/credentials/{connection_id}")
-async def save_credential(connection_id: str, dto: CredentialIn,
-                          auth: tuple[AppSession, str] = Depends(get_token)):
-    row = match_target(await user_catalog(auth[1]), connection_id)
-    if not row.get("connection_id"):
-        raise HTTPException(422, "ID koneksi SAP belum ditemukan dalam katalog MCP.")
-    cid = quote(str(row["connection_id"]), safe="")
-    async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.put(
-            f"{settings.oidc_issuer}/v1/mcp/sap-credentials/{cid}",
-            json=dto.model_dump(),
-            headers={"Authorization": f"Bearer {auth[1]}"},
-        )
-    fail_upstream(res, "Vault OIDC")
-    return {"success": True}
-
-
-@app.delete("/api/sap/credentials/{connection_id}")
-async def delete_credential(connection_id: str, auth: tuple[AppSession, str] = Depends(get_token)):
-    row = match_target(await user_catalog(auth[1]), connection_id)
-    if not row.get("connection_id"):
-        raise HTTPException(422, "ID koneksi SAP belum ditemukan dalam katalog MCP.")
-    cid = quote(str(row["connection_id"]), safe="")
-    async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.delete(
-            f"{settings.oidc_issuer}/v1/mcp/sap-credentials/{cid}",
-            headers={"Authorization": f"Bearer {auth[1]}"},
-        )
-    fail_upstream(res, "Vault OIDC")
-    return {"success": True}
 
 
 @app.post("/api/sap/read-table")
@@ -1107,6 +1060,8 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
         fields = list(dict.fromkeys(f.upper() for f in [*source.fields, *join_fields] if f))
         source_filters = [f for f in source.filters if f.value.strip()]
 
+        chunk_col = None
+        chunk_batches: list[list[str]] = []
         if source_idx > 0:
             for join in dto.joins:
                 if join.right_alias == source.alias and join.left_alias in frames:
@@ -1129,14 +1084,34 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                                     FilterIn(field=right_col, operator="EQ", value=value)
                                     for value in distinct_vals
                                 )
+                            elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
+                                chunk_col = right_col
+                                max_keys = 150
+                                if len(distinct_vals) > max_keys:
+                                    warnings.append(
+                                        f"Kunci join {cond.left_field} melebihi {max_keys} ({len(distinct_vals)} unik). Mengambil data untuk {max_keys} kunci pertama."
+                                    )
+                                capped = distinct_vals[:max_keys]
+                                chunk_batches = [capped[i:i + 25] for i in range(0, len(capped), 25)]
                             elif len(distinct_vals) == 0 and len(left_df) > 0:
                                 warnings.append(
                                     f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
                                 )
 
-        rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
-                                      fields=fields, filters=source_filters,
-                                      rowcount=dto.rowcount), token)
+        if chunk_batches and chunk_col:
+            rows: list[dict[str, Any]] = []
+            for batch in chunk_batches:
+                batch_filters = list(source_filters) + [FilterIn(field=chunk_col, operator="EQ", value=v) for v in batch]
+                batch_rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
+                                                    fields=fields, filters=batch_filters,
+                                                    rowcount=dto.rowcount), token)
+                rows.extend(batch_rows)
+                if len(rows) >= dto.rowcount * 2:
+                    break
+        else:
+            rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
+                                          fields=fields, filters=source_filters,
+                                          rowcount=dto.rowcount), token)
         frames[source.alias] = pd.DataFrame(rows, columns=fields).rename(
             columns={field: f"{source.alias}.{field}" for field in fields})
     merged = frames[dto.sources[0].alias]
@@ -1289,6 +1264,11 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             '    "value": "T2.ATWRT",\n'
             '    "fallback_value": "T2.ATFLV",\n'
             '    "aggregation": "first|sum|mean|min|max|count"\n'
+            '  },\n'
+            '  "visibleColumns": ["KOLOM1", "KOLOM2", "KOLOM3"],\n'
+            '  "sort": {\n'
+            '    "column": "KOLOM1",\n'
+            '    "direction": "asc|desc"\n'
             '  }\n'
             "}\n"
             "Aturan Sangat Penting:\n"
@@ -1298,8 +1278,8 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             "2. Gunakan target server dari current_state.target (kecuali jika pengguna meminta server lain dari daftar allowed_servers).\n"
             "3. Jika pengguna memasukkan kode atau klausa ABAP SQL (seperti ALIAS~FIELD EQ/IN ... atau WHERE ...), parse alias dan field tersebut. "
             "Petakan ke tabel SAP standar yang sesuai (misalnya C -> AUFK, O -> AFKO, OI -> AFPO, B -> MCHB/MSEG/VBAP) atau gunakan tabel yang sudah ada di workspace, dan tambahkan field-field tersebut ke filters.\n"
-            "4. Jika pengguna tidak meminta pivot, set \"pivot\": null.\n"
-            "5. Jika tidak ada kolom hitung, set \"calculatedColumns\": [].\n"
+            "4. Jika pengguna tidak meminta pivot, set \"pivot\": null (atau pertahankan pivot dari current_state.pivot jika ada dan tidak diminta diubah).\n"
+            "5. Jika tidak ada kolom hitung baru dan workspace memiliki calculatedColumns, pertahankan calculatedColumns yang sudah ada kecuali diminta dihapus.\n"
             "6. Jika ada join antara T1 dan T2, conditions HARUS menghubungkan field key yang tepat (misal MATNR ke MATNR, VBELN ke VBELN, AUFNR ke AUFNR).\n"
             "7. Kolom expression pada calculatedColumns harus menggunakan tanda kurung siku [ALIAS.FIELD] atau [KOLOM].\n"
             "8. Nilai target harus dari daftar allowed_servers.\n"
@@ -1310,6 +1290,23 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             "   d. Tuliskan nama kolom sumber di dalam tanda kurung siku [Nama Kolom Riil] PERSIS sama seperti nama di available_columns (contoh: gunakan [Panjang Film (Meter)], JANGAN disingkat menjadi [Panjang]).\n"
             "   e. Jika kolom yang dibutuhkan belum ada di tabel atau query saat ini, tambahkan field SAP yang relevan tersebut ke dalam sources dan joins terlebih dahulu agar datanya tersedia.\n"
             "10. Pemilihan Kolom Tampil (fields & visibleColumns): Hanya sertakan field-field SAP dan kolom yang relevan dengan kebutuhan pelaporan pengguna agar tabel rapi, tidak memuat kolom yang tidak diperlukan.\n"
+            "11. Pengolahan Output, Urutan Kolom ALV, Visibilitas & Sorting (Sangat Penting):\n"
+            "   a. Memindahkan Urutan Kolom ALV (Reorder / Move Columns):\n"
+            "      - Jika pengguna meminta memindahkan kolom (misal 'pindahkan kolom X ke paling depan', 'pindahkan X setelah Y', 'geser Z ke belakang', 'posisikan kolom A di awal'):\n"
+            "        Sertakan array 'visibleColumns' secara LENGKAP dengan urutan baru yang diminta pengguna.\n"
+            "        Urutkan daftar 'visibleColumns' sedemikian rupa sehingga kolom yang diminta dipindahkan menempati posisi barunya, dan SEMUA kolom lain dari current_state.visible_columns tetap disertakan setelahnya atau disekitarnya.\n"
+            "        JANGAN membuang kolom lain kecuali pengguna secara eksplisit meminta 'sembunyikan' atau 'hanya tampilkan'.\n"
+            "   b. Menyembunyikan / Memilih Kolom Tertentu (Column Visibility):\n"
+            "      - Jika pengguna meminta 'sembunyikan kolom X', sertakan 'visibleColumns' dengan menghapus kolom X dari current_state.visible_columns.\n"
+            "      - Jika pengguna meminta 'hanya tampilkan kolom A, B', sertakan 'visibleColumns': [A, B].\n"
+            "      - Jika pengguna meminta 'tampilkan semua kolom', sertakan 'visibleColumns' dengan seluruh daftar current_state.available_columns.\n"
+            "   c. Mengurutkan Baris Data ALV (Sorting):\n"
+            "      - Jika pengguna meminta mengurutkan baris data (misal 'urutkan data berdasarkan tanggal terbaru', 'sort kolom X secara menurun'):\n"
+            "        Sertakan objek 'sort': {\"column\": \"NAMA_KOLOM\", \"direction\": \"asc|desc\"}.\n"
+            "   d. Melepas Pivot atau Mengatur Tabel:\n"
+            "      - Jika pengguna meminta 'lepas pivot' atau 'kembali ke tabel flat', set \"pivot\": null.\n"
+            "      - Jika pengguna meminta 'hapus kolom hitung X', hapus kolom X dari array calculatedColumns.\n"
+            "12. Jika pengguna hanya meminta pengolahan output (seperti pindah kolom, sembunyikan kolom, ubah pivot, atau urutkan data), TETAP PERTAHANKAN seluruh konfigurasi 'target', 'sources', 'joins', 'calculatedColumns' dari current_state agar query SQL tidak berubah atau ter-reset!\n"
         )
         user_prompt = json.dumps({
             "request": dto.prompt,
@@ -1341,7 +1338,10 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
 
     # Canonicalize formula expressions in calculatedColumns to match exact available_columns
     available_cols = dto.current_state.get("available_columns") if isinstance(dto.current_state, dict) else []
-    if available_cols and isinstance(available_cols, list) and isinstance(data.get("calculatedColumns"), list):
+    if not isinstance(available_cols, list):
+        available_cols = []
+
+    if available_cols and isinstance(data.get("calculatedColumns"), list):
         for calc in data["calculatedColumns"]:
             expr = calc.get("expression")
             if expr:
@@ -1354,6 +1354,57 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             fields = calc.get("fields")
             if isinstance(fields, list):
                 calc["fields"] = [resolve_column_name(f, available_cols) or f for f in fields]
+
+    # Canonicalize and safeguard visibleColumns (ALV Column Reordering & Visibility)
+    curr_vis = dto.current_state.get("visible_columns") if isinstance(dto.current_state, dict) else []
+    if not isinstance(curr_vis, list) or not curr_vis:
+        curr_vis = list(available_cols)
+
+    raw_vis = data.get("visibleColumns")
+    lower_prompt = dto.prompt.lower()
+    is_move_intent = any(w in lower_prompt for w in ["pindah", "geser", "depan", "belakang", "tengah", "taruh", "posisi", "urut", "move", "reorder"])
+    is_hide_or_only = any(w in lower_prompt for w in ["hanya", "sembunyi", "hide", "buang", "hapus kolom tampil", "only", "hilang"])
+
+    if isinstance(raw_vis, list) and raw_vis:
+        resolved_vis = []
+        for col in raw_vis:
+            r = resolve_column_name(str(col), available_cols) or str(col)
+            if r not in resolved_vis:
+                resolved_vis.append(r)
+
+        # If user intended to move/reorder columns, preserve all other currently visible columns
+        if is_move_intent and not is_hide_or_only and curr_vis:
+            for c in curr_vis:
+                if c not in resolved_vis and (not available_cols or c in available_cols):
+                    resolved_vis.append(c)
+
+        data["visibleColumns"] = resolved_vis
+    elif is_move_intent and curr_vis:
+        # Fallback if LLM forgot to output visibleColumns when user asked to move a column
+        for col in curr_vis:
+            sub_col = col.split(".", 1)[-1]
+            if (col.lower() in lower_prompt or sub_col.lower() in lower_prompt) and any(w in lower_prompt for w in ["depan", "awal", "pertama", "kiri", "first"]):
+                data["visibleColumns"] = [col] + [c for c in curr_vis if c != col]
+                break
+            elif (col.lower() in lower_prompt or sub_col.lower() in lower_prompt) and any(w in lower_prompt for w in ["belakang", "akhir", "terakhir", "kanan", "last"]):
+                data["visibleColumns"] = [c for c in curr_vis if c != col] + [col]
+                break
+
+    # Canonicalize sort
+    sort_info = data.get("sort")
+    if isinstance(sort_info, dict) and sort_info.get("column"):
+        resolved_sort = resolve_column_name(str(sort_info["column"]), available_cols) or str(sort_info["column"])
+        data["sort"] = {
+            "column": resolved_sort,
+            "direction": "desc" if str(sort_info.get("direction", "")).lower() == "desc" else "asc"
+        }
+    elif any(w in lower_prompt for w in ["urutkan data", "urutkan baris", "sort data", "sort baris"]):
+        direction = "desc" if any(w in lower_prompt for w in ["terbesar", "terbanyak", "terbaru", "desc", "menurun"]) else "asc"
+        for col in curr_vis:
+            sub_col = col.split(".", 1)[-1]
+            if col.lower() in lower_prompt or sub_col.lower() in lower_prompt:
+                data["sort"] = {"column": col, "direction": direction}
+                break
 
     explanation = str(data.get("explanation", ""))
     return {

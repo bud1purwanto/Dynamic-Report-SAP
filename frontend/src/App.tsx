@@ -88,6 +88,7 @@ type AiGenerateResponse = {
       aggregation: string
     } | null
     visibleColumns?: string[]
+    sort?: { column: string; direction?: 'asc' | 'desc' }
     other_target?: string
     table_name?: string
     filters?: { field: string; operator: string; value: string; high_value?: string; sign?: 'I' | 'E' }[]
@@ -106,7 +107,6 @@ type AvailableUser = {
   name: string
   role: string
 }
-type Credential = { connectionId: string; target?: string; hasCredential: boolean; username?: string }
 type Variant = { id: string; name: string; layout: {
   columns: string[]
   columnState?: ReturnType<NonNullable<AgGridReact<Row>['api']>['getColumnState']>
@@ -132,7 +132,7 @@ type CompareVariant = {
     filters: Source['filters']
   }
 }
-type Tab = 'builder' | 'compare' | 'credentials' | 'schedules'
+type Tab = 'builder' | 'compare' | 'schedules'
 type Toast = { id: string; type: 'success' | 'error' | 'info'; message: string; title?: string }
 type Schedule = { id: string; report_id: string; interval_minutes: number;
   enabled: boolean; next_run_at: string; last_run_at: string | null; last_status: string | null; last_error: string | null }
@@ -457,7 +457,6 @@ function App() {
   }
   const [tab, setTab] = useState<Tab>('builder')
   const [servers, setServers] = useState<Server[]>([])
-  const [credentials, setCredentials] = useState<Credential[]>([])
   const [reports, setReports] = useState<Report[]>([])
   const [sharedReports, setSharedReports] = useState<SharedReport[]>([])
   const [activeSharedPermission, setActiveSharedPermission] = useState<'owner' | 'view' | 'edit'>('owner')
@@ -579,9 +578,6 @@ function App() {
     }, 400)
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [compareTarget, compareTable])
-  const [credTarget, setCredTarget] = useState('')
-  const [sapUsername, setSapUsername] = useState('')
-  const [sapPassword, setSapPassword] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [runs, setRuns] = useState<ReportRun[]>([])
   const [scheduleReport, setScheduleReport] = useState('')
@@ -692,11 +688,10 @@ function App() {
   }
 
   async function loadWorkspace() {
-    const [catalog, saved, shared, creds, compVariants] = await Promise.allSettled([
+    const [catalog, saved, shared, compVariants] = await Promise.allSettled([
       api<{ resources: Server[] }>('/sap/servers'),
       api<Report[]>('/reports'),
       api<SharedReport[]>('/reports/shared'),
-      api<Credential[]>('/sap/credentials'),
       api<CompareVariant[]>('/compare-variants'),
     ])
     const serverList = catalog.status === 'fulfilled' ? catalog.value.resources : servers
@@ -706,7 +701,6 @@ function App() {
       setServers(allowed)
       setQuery(q => ({ ...q, target: hasTarget(q.target) ? q.target : allowed[0]?.id || '' }))
       setCompareTarget(t => hasTarget(t) ? t : allowed[0]?.id || '')
-      setCredTarget(t => hasTarget(t) ? t : allowed[0]?.id || '')
       setOtherTarget(t => hasTarget(t) ? t : allowed.find(server => server.id !== (hasTarget(compareTarget) ? compareTarget : allowed[0]?.id))?.id || '')
     }
     const reportList = saved.status === 'fulfilled' ? saved.value : []
@@ -725,9 +719,8 @@ function App() {
     } else if (!activeReport) {
       setActiveReport(cur => allReports.some(r => r.id === cur) ? cur : '')
     }
-    if (creds.status === 'fulfilled') setCredentials(creds.value)
     if (compVariants.status === 'fulfilled') setCompareVariants(compVariants.value)
-    const failed = [catalog, saved, shared, creds, compVariants].find(x => x.status === 'rejected')
+    const failed = [catalog, saved, shared, compVariants].find(x => x.status === 'rejected')
     if (failed?.status === 'rejected') setError(message(failed.reason))
   }
 
@@ -1090,6 +1083,7 @@ function App() {
       calculatedColumns,
       pivot: activePivot,
       available_columns: data.columns.length ? data.columns : (baseData.columns.length ? baseData.columns : []),
+      visible_columns: visibleColumns.length > 0 ? visibleColumns : (data.columns.length ? data.columns : (baseData.columns.length ? baseData.columns : [])),
       column_descriptions: resultDescriptions,
     }
 
@@ -1222,40 +1216,55 @@ function App() {
       setCalculatedColumns(newCalcs)
       if (newPivot) setActivePivot(newPivot)
       const targetPivot = newPivot !== null ? newPivot : activePivot
-      if (Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0) {
-        setVisibleColumns(aiData.visibleColumns)
-      } else {
-        setVisibleColumns([])
+
+      // 5. Apply ALV row sort if returned by AI
+      if (aiData.sort && aiData.sort.column) {
+        setResultSortCol(aiData.sort.column)
+        setResultSortDir(aiData.sort.direction || 'asc')
       }
+
+      // 6. Apply ALV visible columns / column order
+      const hasAiVisible = Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0
+      const initialVis = hasAiVisible ? aiData.visibleColumns! : visibleColumns
+      setVisibleColumns(initialVis)
+
       if (baseData.rows.length > 0) {
         applyPresentation(baseData, newCalcs, targetPivot).then(res => {
           setData(res)
           const calcNames = newCalcs.map(c => c.name)
-          const nextVis = Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0
-            ? aiData.visibleColumns
-            : (visibleColumns.length > 0 ? Array.from(new Set([...visibleColumns.filter(c => res.columns.includes(c)), ...calcNames])) : res.columns)
-          setVisibleColumns(nextVis)
+          let finalVis = hasAiVisible
+            ? aiData.visibleColumns!.filter(c => res.columns.includes(c))
+            : (visibleColumns.length > 0 ? visibleColumns.filter(c => res.columns.includes(c)) : res.columns)
+          // Make sure calculated columns are visible
+          calcNames.forEach(cn => {
+            if (res.columns.includes(cn) && !finalVis.includes(cn)) {
+              finalVis.push(cn)
+            }
+          })
+          setVisibleColumns(finalVis)
         }).catch(() => {})
       }
+
       if (activeReport && activeSharedPermission !== 'view') {
         const definition: ReportDefinition = {
           ...updatedQuery,
           presentation: {
             pivot: targetPivot,
             calculatedColumns: newCalcs,
-            visibleColumns: Array.isArray(aiData.visibleColumns) && aiData.visibleColumns.length > 0 ? aiData.visibleColumns : visibleColumns,
+            visibleColumns: initialVis,
           },
         }
         api(`/reports/${encodeURIComponent(activeReport)}`, {
           method: 'PUT', body: JSON.stringify({ name: reportName, definition }),
         }).catch(() => {})
+        setReports(prev => prev.map(r => r.id === activeReport ? { ...r, definition } : r))
       }
       setAiModalOpen(false)
 
       pushToast({
         type: 'success',
         title: 'Asisten AI Diterapkan',
-        message: 'Konfigurasi query, join, kolom & pivot berhasil diterapkan ke workspace! Tekan Ctrl+Z untuk membatalkan (Undo).',
+        message: 'Konfigurasi query, kolom ALV, kalkulasi & pivot berhasil diterapkan ke workspace! Tekan Ctrl+Z untuk membatalkan (Undo).',
       })
     } else if (aiContextMode === 'compare') {
       pushCompareSnapshotImmediate()
@@ -2244,26 +2253,6 @@ function App() {
     } catch (e) { setError(message(e)) }
   }
 
-  async function saveCredential(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setError('')
-    try {
-      await api(`/sap/credentials/${encodeURIComponent(credTarget)}`, {
-        method: 'PUT', body: JSON.stringify({ username: sapUsername, password: sapPassword }),
-      })
-      setSapPassword(''); setSapUsername('')
-      setCredentials(await api<Credential[]>('/sap/credentials'))
-      setNotice('Kredensial tersimpan di vault OIDC.')
-    } catch (e) { setError(message(e)) }
-    finally { setBusy(false) }
-  }
-
-  function editCredentialForServer(server: Server) {
-    const cred = credentials.find(c => c.connectionId === server.id)
-    setCredTarget(server.id)
-    setSapUsername(cred?.username || '')
-    setSapPassword('')
-    setError('')
-  }
 
   async function submitChangePassword(event?: React.FormEvent) {
     if (event) event.preventDefault()
@@ -2294,7 +2283,7 @@ function App() {
       setNewPassword('')
       setConfirmPassword('')
       setChangePasswordModal(false)
-      setNotice('Password akun OIDC berhasil diperbarui.')
+      setNotice('Password akun berhasil diperbarui.')
     } catch (e) {
       setChangePasswordError(message(e))
     } finally {
@@ -2360,23 +2349,6 @@ function App() {
     finally { setBusy(false) }
   }
 
-  function removeCredential(connectionId: string) {
-    showConfirm({
-      title: 'Hapus Kredensial',
-      message: 'Hapus kredensial SAP untuk target ini dari vault OIDC? Anda perlu memasukkan kredensial baru untuk menghubungkan kembali.',
-      confirmLabel: 'Hapus Kredensial',
-      confirmTone: 'danger',
-      onConfirm: async () => {
-        setBusy(true); setError('')
-        try {
-          await api(`/sap/credentials/${encodeURIComponent(connectionId)}`, { method: 'DELETE' })
-          setCredentials(await api<Credential[]>('/sap/credentials'))
-          setNotice('Kredensial dihapus dari vault OIDC.')
-        } catch (e) { setError(message(e)) }
-        finally { setBusy(false) }
-      },
-    })
-  }
 
   const resultDescriptions = useMemo(() => Object.fromEntries(query.sources.flatMap(source => (structureFields[source.alias] || []).map(field => [`${source.alias}.${field.name}`, field.description || '']))), [query.sources, structureFields])
   const queryFieldColumns = useMemo(() => query.sources.flatMap(s => s.fields.map(f => `${s.alias}.${f.toUpperCase()}`)), [query.sources])
@@ -2592,12 +2564,12 @@ function App() {
       <div><span className="eyebrow light">ENTERPRISE REPORTING PLATFORM</span>
         <h1>Data SAP.<br /><em>Lebih terang.</em></h1>
         <p>Susun, bandingkan, dan pahami laporan bisnis dalam satu ruang kerja yang aman.</p></div>
-      <div className="login-aside-foot"><ShieldCheck size={17} /> Terhubung melalui OIDC dan MCP Gateway</div>
+      <div className="login-aside-foot"><ShieldCheck size={17} /> Terhubung melalui MCP Gateway</div>
     </div>
     <div className="login-panel"><form onSubmit={login} className="login-card">
       <div className="brand"><div className="brand-mark small"><Layers3 size={22} /></div><span>LUMINA</span></div>
       <span className="eyebrow">SELAMAT DATANG</span><h2>Masuk ke workspace</h2>
-      <p>Gunakan akun OIDC perusahaan Anda.</p>
+      <p>Gunakan akun perusahaan Anda.</p>
       <label>Username<input autoFocus value={loginName} onChange={e => setLoginName(e.target.value)} required /></label>
       <label>Password<input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required /></label>
       {error && <div className="alert error">{error}</div>}
@@ -2612,7 +2584,6 @@ function App() {
       <nav>
         <button className={tab === 'builder' ? 'active' : ''} onClick={() => setTab('builder')}><Columns3 size={18} /> Query Builder</button>
         <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}><GitCompareArrows size={18} /> Bandingkan Data</button>
-        <button className={tab === 'credentials' ? 'active' : ''} onClick={() => setTab('credentials')}><KeyRound size={18} /> Kredensial SAP</button>
         <button className={tab === 'schedules' ? 'active' : ''} onClick={openSchedules}><BarChart3 size={18} /> Jadwal & Riwayat</button>
       </nav>
       <div className="sidebar-label saved-label">LAPORAN TERSIMPAN <span>{reports.length}</span></div>
@@ -2666,15 +2637,13 @@ function App() {
 
     <main className="main">
       <header className="topbar">
-        <div className="breadcrumb">Workspace <span>/</span> {tab === 'builder' ? 'Query Builder' : tab === 'compare' ? 'Bandingkan Data' : tab === 'credentials' ? 'Kredensial SAP' : 'Jadwal & Riwayat'}</div>
+        <div className="breadcrumb">Workspace <span>/</span> {tab === 'builder' ? 'Query Builder' : tab === 'compare' ? 'Bandingkan Data' : 'Jadwal & Riwayat'}</div>
         <div className="top-right" style={{ position: 'relative' }}>
-          <span className="connection-dot" />
-          <span style={{ fontSize: '11px', color: '#4d627d' }}>OIDC connected</span>
           <button
             type="button"
             className="user-top-btn"
             onClick={() => setUserDropdownOpen(!userDropdownOpen)}
-            title="Menu Akun OIDC"
+            title="Menu Akun"
           >
             <div className="avatar-mini">{(user.username || 'U')[0].toUpperCase()}</div>
             <span style={{ fontSize: '11px', fontWeight: 600, color: '#273c57' }}>{user.username || user.email}</span>
@@ -2684,7 +2653,7 @@ function App() {
             <div className="user-dropdown-menu" onClick={e => e.stopPropagation()}>
               <div className="user-dropdown-header">
                 <strong>{user.username || user.email}</strong>
-                <small>{user.roles?.[0] || 'User'} · OIDC Account</small>
+                <small>{user.roles?.[0] || 'User'}</small>
               </div>
               <button
                 type="button"
@@ -2698,7 +2667,7 @@ function App() {
                   setChangePasswordModal(true)
                 }}
               >
-                <Lock size={14} /> Ganti Password OIDC
+                <Lock size={14} /> Ganti Password
               </button>
               <button
                 type="button"
@@ -3585,127 +3554,9 @@ function App() {
                 defaultOpen={compareRows.length <= 2 || (i === 0 && compareView === 'different')} />)}</div>
               : <div className="empty-state"><strong>Tidak ada baris pada kategori ini</strong></div>)
               : <div className="empty-state"><div className="empty-illustration"><GitCompareArrows size={27} /></div><strong>Belum ada perbandingan</strong><p>Pilih dua server, tabel, dan parameter filter bila diperlukan.</p></div>}</div></>}
-        {tab === 'credentials' && <><div className="page-heading"><div><span className="eyebrow">SECURE ACCESS</span><h1>Kredensial SAP</h1>
-          <p>Kelola akses SAP pribadi Anda melalui vault OIDC pusat. Setiap target server dapat ditambahkan atau diperbarui kredensialnya.</p></div></div>
-          <div className="credentials-layout"><section className="card"><div className="section-head"><div><span className="icon-tile blue"><ShieldCheck size={18} /></span><strong>Daftar Server SAP</strong></div>
-            <span className="count-pill">{servers.length} server</span></div>
-            {servers.map(server => {
-              const cred = credentials.find(c => c.connectionId === server.id)
-              const hasCred = !!cred?.hasCredential
-              const isSelected = credTarget === server.id
-              return <div className={`credential-row ${isSelected ? 'selected-server' : ''}`} key={server.id}>
-                <div className="server-icon"><Database size={19} /></div>
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <strong>{server.label}</strong>
-                    {hasCred && cred?.username && <span className="credential-user-badge">@{cred.username}</span>}
-                  </div>
-                  <small>{server.environment || server.resource_key}</small>
-                </div>
-                <span className={`credential-status ${hasCred ? 'ready' : ''}`}>
-                  {hasCred ? 'Tersimpan' : 'Belum diatur'}
-                </span>
-                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                  <button
-                    className="button subtle"
-                    style={{ padding: '0.35rem 0.65rem', height: '30px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}
-                    title={hasCred ? `Ubah kredensial ${server.label}` : `Atur kredensial ${server.label}`}
-                    onClick={() => editCredentialForServer(server)}
-                  >
-                    {hasCred ? <Edit2 size={13} /> : <Plus size={13} />}
-                    {hasCred ? 'Ubah' : 'Atur'}
-                  </button>
-                  {hasCred && (
-                    <button
-                      className="icon-button"
-                      title="Hapus kredensial dari vault"
-                      onClick={() => removeCredential(server.id)}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            })}
-            {!servers.length && <div className="empty-small">Tidak ada server SAP pada katalog OIDC.</div>}</section>
-            <section className="card">
-              <div className="section-head">
-                <div>
-                  <span className="icon-tile purple"><KeyRound size={18} /></span>
-                  <strong>{credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Ubah Kredensial' : 'Tambah Kredensial'}</strong>
-                </div>
-                {credentials.find(c => c.connectionId === credTarget)?.hasCredential && (
-                  <span className="tiny-pill" style={{ color: '#2e976d', background: '#e8f8ef' }}>
-                    <CheckCircle2 size={12} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
-                    Sudah ada data
-                  </span>
-                )}
-              </div>
-              <form className="credential-form" onSubmit={saveCredential}>
-                <label>Target Server SAP
-                  <select value={credTarget} onChange={e => {
-                    const nextId = e.target.value
-                    setCredTarget(nextId)
-                    const existing = credentials.find(c => c.connectionId === nextId)
-                    setSapUsername(existing?.username || '')
-                    setSapPassword('')
-                  }}>
-                    {servers.map(s => {
-                      const c = credentials.find(item => item.connectionId === s.id)
-                      return (
-                        <option value={s.id} key={s.id}>
-                          {s.label} {c?.hasCredential ? '✓ (Sudah ada)' : '(Belum diatur)'}
-                        </option>
-                      )
-                    })}
-                  </select>
-                </label>
-                <label>
-                  Username SAP
-                  <input
-                    autoComplete="off"
-                    value={sapUsername}
-                    onChange={e => setSapUsername(e.target.value)}
-                    required
-                    placeholder="Masukkan username SAP"
-                  />
-                </label>
-                <label>
-                  Password SAP
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={sapPassword}
-                    onChange={e => setSapPassword(e.target.value)}
-                    required
-                    placeholder={credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Ketik password baru untuk memperbarui' : '••••••••••'}
-                  />
-                </label>
-                <div className="secure-note">
-                  <ShieldCheck size={17} />
-                  <span>Kredensial disimpan terenkripsi di vault OIDC pusat (bukan di database Lumina) dan digunakan saat mengakses RFC SAP.</span>
-                </div>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <button className="button primary" disabled={busy || !credTarget || !sapUsername.trim() || !sapPassword}>
-                    <Save size={16} />
-                    {credentials.find(c => c.connectionId === credTarget)?.hasCredential ? 'Perbarui di Vault' : 'Simpan ke Vault'}
-                  </button>
-                  {credentials.find(c => c.connectionId === credTarget)?.hasCredential && (
-                    <button
-                      type="button"
-                      className="button subtle"
-                      style={{ color: '#c93b4a' }}
-                      onClick={() => removeCredential(credTarget)}
-                    >
-                      <Trash2 size={14} /> Hapus
-                    </button>
-                  )}
-                </div>
-              </form>
-            </section>
-          </div></>}
+
         {tab === 'schedules' && <><div className="page-heading"><div><span className="eyebrow">AUTOMATION</span><h1>Jadwal & Riwayat</h1>
-          <p>Jalankan laporan tersimpan secara berkala dengan identitas OIDC Anda. Unduh hasil Excel dari riwayat.</p></div></div>
+          <p>Jalankan laporan tersimpan secara berkala. Unduh hasil Excel dari riwayat.</p></div></div>
           <section className="card schedule-card"><div className="section-head"><div><span className="icon-tile blue"><Plus size={18} /></span><strong>Buat Jadwal</strong></div></div>
             <div className="schedule-form"><label>Laporan<select value={scheduleReport} onChange={e => setScheduleReport(e.target.value)}>
               <option value="">Pilih laporan</option>{reports.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>
@@ -3917,7 +3768,7 @@ function App() {
           <div className="modal-head">
             <div className="modal-title">
               <span className="modal-title-icon purple"><Lock size={18} /></span>
-              <span>{user?.mustChangePassword ? 'Wajib Ganti Password Akun' : 'Ganti Password OIDC'}</span>
+              <span>{user?.mustChangePassword ? 'Wajib Ganti Password Akun' : 'Ganti Password'}</span>
             </div>
             {!user?.mustChangePassword && (
               <button
@@ -3937,7 +3788,7 @@ function App() {
                 </div>
               ) : (
                 <p style={{ margin: 0, fontSize: '12px', color: '#687b92' }}>
-                  Perbarui kata sandi login OIDC Anda. Kata sandi ini berlaku untuk seluruh sistem Lumina.
+                  Perbarui kata sandi login Anda. Kata sandi ini berlaku untuk seluruh sistem Lumina.
                 </p>
               )}
 
@@ -5484,6 +5335,41 @@ function App() {
                         )}
                       </div>
                     </div>
+
+                    {aiResult.data.visibleColumns && aiResult.data.visibleColumns.length > 0 && (
+                      <div className="ai-component-card" style={{ gridColumn: '1 / -1' }}>
+                        <div className="ai-component-card-title">
+                          <SlidersHorizontal size={14} style={{ color: '#059669' }} />
+                          <span>Urutan & Tampilan Kolom ALV ({aiResult.data.visibleColumns.length} Kolom)</span>
+                          {aiResult.data.sort && (
+                            <span className="ai-tag" style={{ marginLeft: 'auto', background: '#ecfdf5', color: '#047857' }}>
+                              Urut Baris: {aiResult.data.sort.column} ({aiResult.data.sort.direction?.toUpperCase()})
+                            </span>
+                          )}
+                        </div>
+                        <div className="ai-component-card-body">
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', maxHeight: '130px', overflowY: 'auto', padding: '4px 0' }}>
+                            {aiResult.data.visibleColumns.map((col, idx) => (
+                              <span key={idx} style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                background: idx === 0 ? '#eff6ff' : '#f8fafc',
+                                border: idx === 0 ? '1px solid #93c5fd' : '1px solid #e2e8f0',
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                color: idx === 0 ? '#1d4ed8' : '#334155',
+                                fontWeight: idx === 0 ? 700 : 500,
+                              }}>
+                                <small style={{ color: idx === 0 ? '#3b82f6' : '#94a3b8', fontSize: '9.5px' }}>#{idx + 1}</small>
+                                <span>{col}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

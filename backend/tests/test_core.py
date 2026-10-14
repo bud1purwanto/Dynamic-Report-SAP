@@ -423,6 +423,90 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         calc = result["data"]["calculatedColumns"][0]
         self.assertEqual(calc["expression"], "([Panjang Film (Meter)] * [Lebar Film (Milimeter)] * [Grammage]) / 1000000")
 
+    async def test_ai_generate_reorders_columns_and_preserves_remaining(self):
+        llm_response = main.json.dumps({
+            "explanation": "Memindahkan kolom BERAT AKTUAL ke paling depan",
+            "visibleColumns": ["BERAT AKTUAL"]
+        })
+        dto = main.AiFullAssistantIn(
+            prompt="pindahkan kolom BERAT AKTUAL ke paling depan",
+            context_type="builder",
+            current_state={
+                "available_columns": ["O.AUFNR", "O.MATNR", "Panjang Film (Meter)", "BERAT AKTUAL"],
+                "visible_columns": ["O.AUFNR", "O.MATNR", "Panjang Film (Meter)", "BERAT AKTUAL"]
+            }
+        )
+        auth = (SimpleNamespace(user_id="alice"), "token")
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[{"id": "conn-dev", "label": "DEV"}])), \
+             patch.object(main, "query_llm_with_fallback", AsyncMock(return_value=(llm_response, "test-ai"))):
+            result = await main.ai_generate(dto, auth)
+        vis = result["data"]["visibleColumns"]
+        self.assertEqual(vis, ["BERAT AKTUAL", "O.AUFNR", "O.MATNR", "Panjang Film (Meter)"])
+
+    async def test_ai_generate_sorts_rows(self):
+        llm_response = main.json.dumps({
+            "explanation": "Mengurutkan data berdasarkan nomor order menurun",
+            "sort": {"column": "AUFNR", "direction": "desc"}
+        })
+        dto = main.AiFullAssistantIn(
+            prompt="urutkan data berdasarkan nomor order menurun",
+            context_type="builder",
+            current_state={
+                "available_columns": ["O.AUFNR", "O.MATNR"],
+                "visible_columns": ["O.AUFNR", "O.MATNR"]
+            }
+        )
+        auth = (SimpleNamespace(user_id="alice"), "token")
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[{"id": "conn-dev", "label": "DEV"}])), \
+             patch.object(main, "query_llm_with_fallback", AsyncMock(return_value=(llm_response, "test-ai"))):
+            result = await main.ai_generate(dto, auth)
+        sort = result["data"]["sort"]
+        self.assertEqual(sort["column"], "O.AUFNR")
+    async def test_execute_query_chunks_downstream_filters_when_distinct_keys_exceed_30(self):
+        # 40 distinct items in upstream table
+        t1_rows = [{"AUFNR": f"ORD_{i:03d}", "WERKS": "1000"} for i in range(40)]
+        read_calls = []
+
+        async def read_rows(dto, _token):
+            read_calls.append(dto)
+            if dto.table_name == "AUFK":
+                return t1_rows
+            # For AFPO, verify it received chunked batch filter with AUFNR
+            received_aufnrs = [f.value for f in dto.filters if f.field == "AUFNR"]
+            return [{"AUFNR": aufnr, "MATNR": f"MAT_{aufnr}"} for aufnr in received_aufnrs]
+
+        async def structure(_token, _target, table):
+            if table == "AUFK":
+                return ([{"name": "AUFNR", "data_type": "CHAR", "is_key": True},
+                         {"name": "WERKS", "data_type": "CHAR", "is_key": False}], "")
+            return ([{"name": "AUFNR", "data_type": "CHAR", "is_key": True},
+                     {"name": "MATNR", "data_type": "CHAR", "is_key": False}], "")
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR", "WERKS"]),
+                main.SourceIn(alias="T2", table_name="AFPO", fields=["MATNR"]),
+            ],
+            joins=[main.JoinIn(left_alias="T1", left_field="AUFNR",
+                               right_alias="T2", right_field="AUFNR")],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.execute_query(query, "user-token")
+
+        # AUFK (1 call) + AFPO chunk 1 (25 items) + AFPO chunk 2 (15 items) = 3 calls
+        self.assertEqual(len(read_calls), 3)
+        self.assertEqual(read_calls[0].table_name, "AUFK")
+        self.assertEqual(read_calls[1].table_name, "AFPO")
+        self.assertEqual(read_calls[2].table_name, "AFPO")
+        self.assertEqual(len([f for f in read_calls[1].filters if f.field == "AUFNR"]), 25)
+        self.assertEqual(len([f for f in read_calls[2].filters if f.field == "AUFNR"]), 15)
+        # All 40 joined rows matched!
+        self.assertEqual(len(result["rows"]), 40)
+
 
 if __name__ == "__main__":
     unittest.main()
