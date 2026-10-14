@@ -28,7 +28,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, ReportShare, Variant, get_db, init_db, utcnow
+from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, ReportShare, Variant, auth_engine, get_db, init_db, utcnow
 
 
 app = FastAPI(title="Lumina Dynamic Report", version="0.1.0")
@@ -1876,6 +1876,30 @@ async def list_available_users(auth: tuple[AppSession, str] = Depends(get_token)
     current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip().upper()
     users_dict: dict[str, dict[str, Any]] = {}
 
+    # 1. Ambil data pengguna asli dari database OIDC (ai_auth.users)
+    if auth_engine:
+        try:
+            with auth_engine.connect() as aconn:
+                rows = aconn.execute(
+                    text("SELECT username, email, role FROM users WHERE is_active = TRUE ORDER BY username ASC")
+                ).fetchall()
+                for r in rows:
+                    u_name = (r[0] or "").strip()
+                    if u_name:
+                        u_key = u_name.upper()
+                        if u_key != current_username:
+                            email_val = (r[1] or "").strip()
+                            raw_role = (r[2] or "USER").strip().upper()
+                            display_role = "Superadmin" if raw_role == "SUPERADMIN" else ("User" if raw_role == "USER" else raw_role.title())
+                            users_dict[u_key] = {
+                                "username": u_name,
+                                "name": email_val or u_name,
+                                "role": display_role
+                            }
+        except Exception:
+            pass
+
+    # 2. Enrich dengan profil sesi login lokal (jika ada nama lengkap atau role kustom)
     try:
         sessions = db.scalars(select(AppSession)).all()
         for s in sessions:
@@ -1884,44 +1908,21 @@ async def list_available_users(auth: tuple[AppSession, str] = Depends(get_token)
                 if u_name:
                     u_key = u_name.upper()
                     if u_key != current_username:
-                        users_dict[u_key] = {
-                            "username": u_name,
-                            "name": s.user_profile.get("name") or s.user_profile.get("email") or u_name,
-                            "role": s.user_profile.get("role") or "User"
-                        }
+                        prof_name = (s.user_profile.get("name") or s.user_profile.get("email") or "").strip()
+                        prof_role = (s.user_profile.get("role") or "").strip()
+                        if u_key in users_dict:
+                            if prof_name and prof_name != u_name:
+                                users_dict[u_key]["name"] = prof_name
+                            if prof_role:
+                                users_dict[u_key]["role"] = prof_role.title() if prof_role.isupper() else prof_role
+                        else:
+                            users_dict[u_key] = {
+                                "username": u_name,
+                                "name": prof_name or u_name,
+                                "role": prof_role or "User"
+                            }
     except Exception:
         pass
-
-    try:
-        rows = db.execute(text("SELECT username, full_name, role FROM ai_assistant_dev.users")).fetchall()
-        for r in rows:
-            u_name = (r[0] or "").strip()
-            if u_name:
-                u_key = u_name.upper()
-                if u_key != current_username and u_key not in users_dict:
-                    users_dict[u_key] = {
-                        "username": u_name,
-                        "name": r[1] or u_name,
-                        "role": r[2] or "User"
-                    }
-    except Exception:
-        pass
-
-    default_trst_users = [
-        {"username": "TRST-BUDI", "name": "Budi Purwanto", "role": "ABAP Consultant"},
-        {"username": "TRSTDEV", "name": "TRST Developer", "role": "Superadmin"},
-        {"username": "TRST-FIRGI", "name": "Firgi Sotya", "role": "Backend Developer"},
-        {"username": "TRST-WILLIAM", "name": "William Febrian", "role": "ABAP Developer"},
-        {"username": "TRST-NIA", "name": "Fillia Agnia", "role": "Data Analyst"},
-        {"username": "TRST-WAFI", "name": "Wafi Makarim", "role": "SAP Functional"},
-        {"username": "TRST-FANY", "name": "Fany", "role": "ABAP Developer"},
-        {"username": "TRST-SUGIK", "name": "Sugik", "role": "Basis Consultant"},
-        {"username": "TRST-INT", "name": "Internal IT", "role": "Administrator"},
-    ]
-    for d in default_trst_users:
-        u_key = d["username"].upper()
-        if u_key != current_username and u_key not in users_dict:
-            users_dict[u_key] = d
 
     return sorted(users_dict.values(), key=lambda x: x["username"])
 

@@ -101,6 +101,13 @@ class ReportShare(Base):
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
+auth_engine = None
+if getattr(settings, "auth_database_url", None):
+    try:
+        auth_engine = create_engine(settings.auth_database_url, pool_pre_ping=True, pool_size=5, max_overflow=5)
+    except Exception:
+        auth_engine = None
+
 
 def init_db() -> None:
     # DATABASE_SCHEMA is validated as a PostgreSQL identifier in config.py.

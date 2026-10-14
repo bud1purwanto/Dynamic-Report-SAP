@@ -20,6 +20,7 @@ def required(name: str) -> str:
 class Settings:
     database_url: str
     database_schema: str
+    auth_database_url: str
     oidc_issuer: str
     catalog_token: str
     gateway_url: str
@@ -54,6 +55,7 @@ def get_settings() -> Settings:
     return Settings(
         database_url=required("DATABASE_URL"),
         database_schema=schema,
+        auth_database_url=os.getenv("AUTH_DATABASE_URL", "postgresql+psycopg://admin_rag:Trias123@192.168.1.162:5432/ai_auth").strip(),
         oidc_issuer=required("DASHBOARD_OIDC_ISSUER").rstrip("/"),
         catalog_token=required("DASHBOARD_MCP_API_TOKEN"),
         gateway_url=required("DASHBOARD_MCP_GATEWAY_URL"),
