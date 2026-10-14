@@ -110,3 +110,49 @@ Global trace level        : 0
 2026-10-14 08:38:55.228647 [125721527703232] >> Error entry
 	[Handle: 125721343178448	ConvID: 84667373	Target: eccdevlinux	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
 	RfcSystemException: Key: , Code: RFC_ABAP_RUNTIME_FAILURE, Message: Illegal access to a string (length too large)
+
+**** Log file opened at 2026-10-14 16:50:16.038412 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 2222571
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 16:50:16.038387 [136667371390656] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 606
+2026-10-14 16:50:16.038529 [136667371390656] >> Error entry
+	[Handle: 136667268658864	ConvID: 47737263	Target: trsteccdev	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: SAPSQL_WHERE_QUOTES, Code: RFC_ABAP_RUNTIME_FAILURE, Message: A condition specified dynamically has an unexpected format.
+
+**** Log file opened at 2026-10-14 16:54:46.147394 UTC+07:00 (GMT), Encoding UTF-8
+NW RFC Library: SDK variant, Release 750 Patch Level 12
+Compilation date          : Jul 12 2023 19:14:38
+CPIC library              : 753.2023.07.06 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1216
+Current working directory : /data/Projects/Dynamic-Report
+Program                   : node
+Process ID                : 2227378
+User                      : abap
+Hardware                  : AMD/Intel x86_64 with Linux x86_64
+Operating_system          : Linux 6.17.0-41-generic
+Hostname                  : ABAP
+IP address                : 127.0.1.1
+IPv6 address              : fe80::d1fe:c847:78c7:ef6d
+Global trace level        : 0
+
+2026-10-14 16:54:46.147372 [132019866842816] >> Error entry
+	Error in receive: 18, no SAP ErrInfo available, 536
+2026-10-14 16:54:46.147489 [132019866842816] >> Error entry
+	[Handle: 132019778500272	ConvID: 48037466	Target: trsteccdev	SysID: TRD	SysNr: 00	User: TRSTDEV	Client: 130	Language: E	Codepage: 4103]
+	RfcSystemException: Key: CALL_FUNCTION_NOT_REMOTE, Code: RFC_ABAP_RUNTIME_FAILURE, Message: The function module "ZQM_GET_BATCH_JR_BY_SR" cannot be used for 'remote' calls.
