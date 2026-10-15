@@ -252,8 +252,10 @@ class ScheduleToggleIn(BaseModel):
 
 
 def fail_upstream(res: httpx.Response, service: str) -> None:
+    if service == "OIDC" and res.status_code in (401, 403):
+        raise HTTPException(401, "Sesi OIDC telah kedaluwarsa. Silakan login kembali.")
     if res.status_code in (401, 403):
-        raise HTTPException(401, f"Sesi atau izin {service} tidak valid.")
+        raise HTTPException(403, f"Akses {service} ditolak (HTTP {res.status_code}).")
     if res.status_code >= 400:
         detail = ""
         try:
@@ -282,7 +284,10 @@ def friendly_sap_error(message: str, target: str) -> str:
     return f"MCP Gateway SAP ({target}) gagal: {message}"
 
 
-async def get_token(request: Request, db: Session = Depends(get_db)) -> tuple[AppSession, str]:
+async def get_token(request: Request, response: Response = None, db: Session = Depends(get_db)) -> tuple[AppSession, str]:
+    if isinstance(response, Session) or hasattr(response, "execute"):
+        db = response
+        response = None
     cookie = request.cookies.get(settings.cookie_name)
     if not cookie:
         raise HTTPException(401, "Silakan login.")
@@ -305,16 +310,33 @@ async def get_token(request: Request, db: Session = Depends(get_db)) -> tuple[Ap
                     .with_for_update().execution_options(populate_existing=True)
                 ).scalar_one_or_none()
 
-            row = await asyncio.to_thread(lock_session)
+            locked_row = await asyncio.to_thread(lock_session)
+            if locked_row:
+                row = locked_row
             if not row or row.expires_at < utcnow():
                 raise HTTPException(401, "Sesi kedaluwarsa.")
     except OperationalError:
         await asyncio.to_thread(db.rollback)
-        raise HTTPException(503, "Sesi sedang diproses. Silakan coba lagi.") from None
+        if not row or row.access_expires_at <= utcnow():
+            raise HTTPException(503, "Sesi sedang diproses. Silakan coba lagi.") from None
     try:
         token = fernet.decrypt(row.access_token.encode()).decode()
     except InvalidToken:
         raise HTTPException(401, "Sesi tidak valid. Silakan login kembali.") from None
+
+    # Sliding session renewal: jika sisa masa berlaku sesi < separuh durasi total, perpanjang sesi
+    half_session = timedelta(hours=max(1, settings.session_hours // 2))
+    if row.expires_at < utcnow() + half_session:
+        row.expires_at = utcnow() + timedelta(hours=settings.session_hours)
+        await asyncio.to_thread(db.commit)
+        if response:
+            response.set_cookie(
+                settings.cookie_name, signer.dumps(session_id), httponly=True,
+                secure=secure_cookie_for(request),
+                samesite="lax",
+                max_age=settings.session_hours * 3600, path="/",
+            )
+
     if row.access_expires_at <= utcnow() + timedelta(seconds=60):
         try:
             refresh = fernet.decrypt(row.refresh_token.encode()).decode()
@@ -333,9 +355,20 @@ async def get_token(request: Request, db: Session = Depends(get_db)) -> tuple[Ap
             row.access_token = fernet.encrypt(token.encode()).decode()
             row.refresh_token = fernet.encrypt(new_refresh.encode()).decode()
             row.access_expires_at = utcnow() + timedelta(seconds=int(data.get("expiresIn", 900)))
-            db.commit()
-        except (httpx.HTTPError, KeyError, ValueError):
-            raise HTTPException(401, "Sesi OIDC kedaluwarsa. Silakan login kembali.") from None
+            await asyncio.to_thread(db.commit)
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                if row.access_expires_at > utcnow():
+                    logger.warning("OIDC refresh returned 401, using remaining token validity until %s", row.access_expires_at)
+                else:
+                    raise HTTPException(401, "Sesi OIDC kedaluwarsa. Silakan login kembali.") from None
+            else:
+                raise
+        except (httpx.HTTPError, KeyError, ValueError) as err:
+            if row.access_expires_at > utcnow():
+                logger.warning("Gagal memperbarui token OIDC (%s), menggunakan token akses yang masih berlaku", err)
+            else:
+                raise HTTPException(503, "Layanan otentikasi sedang tidak dapat dijangkau. Silakan coba lagi.") from None
     return row, token
 
 

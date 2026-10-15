@@ -15,7 +15,14 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       }
     }
     if (res.status === 401 && path !== '/auth/login' && path !== '/auth/me') {
-      window.dispatchEvent(new CustomEvent('lumina:unauthorized', { detail: String(detail) }))
+      // Verifikasi ke /auth/me sebelum logout otomatis agar error parsial tidak mereset workspace
+      fetch('/api/auth/me', { credentials: 'include' })
+        .then(checkRes => {
+          if (checkRes.status === 401) {
+            window.dispatchEvent(new CustomEvent('lumina:unauthorized', { detail: String(detail) }))
+          }
+        })
+        .catch(() => {})
     }
     throw new Error(String(detail))
   }

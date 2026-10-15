@@ -61,7 +61,7 @@ def get_settings() -> Settings:
         catalog_token=required("DASHBOARD_MCP_API_TOKEN"),
         gateway_url=required("DASHBOARD_MCP_GATEWAY_URL"),
         session_secret=secret,
-        session_hours=int(os.getenv("SESSION_EXPIRE_HOURS", "24")),
+        session_hours=int(os.getenv("SESSION_EXPIRE_HOURS", "720")),
         schedule_delegation_days=int(os.getenv("SCHEDULE_DELEGATION_DAYS", "30")),
         cookie_name=os.getenv("SESSION_COOKIE_NAME", "sap_session"),
         cookie_secure=None if cookie_mode == "auto" else cookie_mode == "true",
