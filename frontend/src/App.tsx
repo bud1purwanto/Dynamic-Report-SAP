@@ -430,6 +430,56 @@ function App() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [queryProgress, setQueryProgress] = useState(0)
+  const [queryProgressText, setQueryProgressText] = useState('')
+  const [queryElapsedSeconds, setQueryElapsedSeconds] = useState(0)
+
+  useEffect(() => {
+    if (!busy) {
+      setQueryProgress(0)
+      setQueryProgressText('')
+      setQueryElapsedSeconds(0)
+      return
+    }
+
+    setQueryProgress(8)
+    setQueryProgressText('Menghubungkan ke server SAP…')
+    setQueryElapsedSeconds(0)
+
+    const startTime = Date.now()
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000)
+      setQueryElapsedSeconds(elapsed)
+
+      setQueryProgress(prev => {
+        if (prev >= 98) return prev
+        let target = 8
+        let text = 'Menghubungkan ke server SAP…'
+
+        if (elapsed < 2) {
+          target = 8 + elapsed * 10
+          text = 'Menghubungkan & memeriksa kontrak SAP…'
+        } else if (elapsed < 6) {
+          target = 28 + ((elapsed - 2) / 4) * 24
+          text = 'Mengeksekusi query & memfilter data SAP…'
+        } else if (elapsed < 15) {
+          target = 52 + ((elapsed - 6) / 9) * 24
+          text = 'Membaca record tabel SAP NetWeaver…'
+        } else if (elapsed < 35) {
+          target = 76 + ((elapsed - 15) / 20) * 14
+          text = 'Memproses relasi tabel & kalkulasi field…'
+        } else {
+          target = 90 + Math.min(6, (elapsed - 35) * 0.15)
+          text = 'Menyelesaikan penggabungan dataset SAP…'
+        }
+
+        setQueryProgressText(text)
+        return Math.min(96, Math.max(prev, Math.round(target)))
+      })
+    }, 200)
+
+    return () => clearInterval(timer)
+  }, [busy])
   const [error, setErrorState] = useState('')
   const [notice, setNoticeState] = useState('')
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -531,6 +581,18 @@ function App() {
   const [compareFilterMode, setCompareFilterMode] = useState<'all' | 'selected' | 'keys'>('all')
   const [compareSortOrder, setCompareSortOrder] = useState<'sap' | 'selected_first' | 'keys_first' | 'az'>('sap')
   const [compareParameterModalOpen, setCompareParameterModalOpen] = useState(false)
+
+  useEffect(() => {
+    if (parameterModalOpen) {
+      setErrorState('')
+    }
+  }, [parameterModalOpen])
+
+  useEffect(() => {
+    if (compareParameterModalOpen) {
+      setErrorState('')
+    }
+  }, [compareParameterModalOpen])
   const [compareRowcount, setCompareRowcount] = useState(100)
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
   const [compareRows, setCompareRows] = useState<CompareRow[]>([])
@@ -1628,6 +1690,9 @@ function App() {
     try {
       const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
       const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
+      setQueryProgress(100)
+      setQueryProgressText('Data berhasil dimuat!')
+      await new Promise(r => setTimeout(r, 200))
       setBaseData(result)
       const availableForPivot = [...result.columns, ...calculatedColumns.map(c => c.name)]
       const pivot = activePivot && availableForPivot.includes(activePivot.column) && availableForPivot.includes(activePivot.value)
@@ -1978,6 +2043,9 @@ function App() {
         { target: compareTarget, other_target: otherTarget, table_name: compareTable.trim(),
           filters: compareFilters, rowcount: compareRowcount },
       )
+      setQueryProgress(100)
+      setQueryProgressText('Perbandingan data selesai!')
+      await new Promise(r => setTimeout(r, 200))
       setCompareRows(result.rows)
       setCompareResult(result)
       const sameCount = result.rows.filter(row => row.status === 'same').length
@@ -2903,7 +2971,10 @@ function App() {
                   </span>
                 </button>
               )}
-              <button className="button primary" onClick={handleRunQueryClick} disabled={busy || !query.target}><Play size={16} fill="currentColor" />{busy ? 'Memproses…' : 'Jalankan Query'}</button>
+              <button className="button primary" onClick={handleRunQueryClick} disabled={busy || !query.target}>
+                {busy ? <span className="spinner" /> : <Play size={16} fill="currentColor" />}
+                {busy ? `${queryProgress}% · Memproses…` : 'Jalankan Query'}
+              </button>
             </div></div>
           <div className="toolbar"><div className="field-group"><label>SERVER SAP</label>
             <select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>
@@ -4645,27 +4716,47 @@ function App() {
       </div>
     )}
     {parameterModalOpen && (
-      <div className="modal-backdrop" onClick={() => setParameterModalOpen(false)}>
+      <div className="modal-backdrop" onClick={() => { if (!busy) { setErrorState(''); setParameterModalOpen(false) } }}>
         <div className="modal-card parameter-modal" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <div className="modal-title">
               <span className="modal-title-icon blue"><SlidersHorizontal size={18} /></span>
               <span>Parameter Filter Query</span>
             </div>
-            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => setParameterModalOpen(false)}>
+            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => { setErrorState(''); setParameterModalOpen(false) }}>
               <X size={16} />
             </button>
           </div>
           <div className="parameter-modal-body">
             {busy && (
-              <div className="modal-loading-banner">
-                <span className="spinner" />
-                <span>Sedang mengeksekusi query ke server SAP… Mohon tunggu hingga proses selesai.</span>
+              <div className="modal-loading-banner progress-banner">
+                <div className="progress-banner-header">
+                  <div className="progress-banner-title">
+                    <span className="spinner" />
+                    <span>{queryProgressText || 'Sedang mengeksekusi query ke server SAP…'}</span>
+                  </div>
+                  <div className="progress-banner-stats">
+                    <span className="progress-banner-pct">{queryProgress}%</span>
+                    <span className="progress-banner-time">({queryElapsedSeconds}s)</span>
+                  </div>
+                </div>
+                <div className="progress-bar-track">
+                  <div className="progress-bar-fill" style={{ width: `${queryProgress}%` }} />
+                </div>
               </div>
             )}
             {error && (
-              <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
-                {error}
+              <div className="alert error" style={{ margin: 0, fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <span style={{ minWidth: 0, wordBreak: 'break-word' }}>{error}</span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ width: '22px', height: '22px', minWidth: '22px', padding: 0, color: 'inherit', opacity: 0.8 }}
+                  onClick={() => setErrorState('')}
+                  title="Tutup pesan error"
+                >
+                  <X size={13} />
+                </button>
               </div>
             )}
             <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
@@ -4789,14 +4880,14 @@ function App() {
             }))}
           </div>
           <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
-            <button className="button subtle" disabled={busy} onClick={() => setParameterModalOpen(false)}>
+            <button className="button subtle" disabled={busy} onClick={() => { setErrorState(''); setParameterModalOpen(false) }}>
               Batal
             </button>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 className="button subtle"
                 disabled={busy}
-                onClick={() => setParameterModalOpen(false)}
+                onClick={() => { setErrorState(''); setParameterModalOpen(false) }}
               >
                 Tutup & Simpan Nilai
               </button>
@@ -4811,7 +4902,7 @@ function App() {
                 }}
               >
                 {busy ? <span className="spinner" /> : <Play size={14} fill="currentColor" />}
-                {busy ? 'Mengeksekusi Query…' : 'Jalankan Query'}
+                {busy ? `Memuat… (${queryProgress}%)` : 'Jalankan Query'}
               </button>
             </div>
           </div>
@@ -4819,27 +4910,47 @@ function App() {
       </div>
     )}
     {compareParameterModalOpen && (
-      <div className="modal-backdrop" onClick={() => !busy && setCompareParameterModalOpen(false)}>
+      <div className="modal-backdrop" onClick={() => { if (!busy) { setErrorState(''); setCompareParameterModalOpen(false) } }}>
         <div className="modal-card parameter-modal" onClick={e => e.stopPropagation()}>
           <div className="modal-head">
             <div className="modal-title">
               <span className="modal-title-icon purple"><SlidersHorizontal size={18} /></span>
               <span>Parameter Filter Perbandingan · {compareTable}</span>
             </div>
-            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => setCompareParameterModalOpen(false)}>
+            <button className="icon-button" title="Tutup" disabled={busy} onClick={() => { setErrorState(''); setCompareParameterModalOpen(false) }}>
               <X size={16} />
             </button>
           </div>
           <div className="parameter-modal-body">
             {busy && (
-              <div className="modal-loading-banner">
-                <span className="spinner" />
-                <span>Sedang mengambil & membandingkan data dari kedua server SAP… Mohon tunggu hingga proses selesai.</span>
+              <div className="modal-loading-banner progress-banner">
+                <div className="progress-banner-header">
+                  <div className="progress-banner-title">
+                    <span className="spinner" />
+                    <span>{queryProgressText || 'Sedang mengambil & membandingkan data SAP…'}</span>
+                  </div>
+                  <div className="progress-banner-stats">
+                    <span className="progress-banner-pct">{queryProgress}%</span>
+                    <span className="progress-banner-time">({queryElapsedSeconds}s)</span>
+                  </div>
+                </div>
+                <div className="progress-bar-track">
+                  <div className="progress-bar-fill" style={{ width: `${queryProgress}%` }} />
+                </div>
               </div>
             )}
             {error && (
-              <div className="alert error" style={{ margin: 0, fontSize: '11px' }}>
-                {error}
+              <div className="alert error" style={{ margin: 0, fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <span style={{ minWidth: 0, wordBreak: 'break-word' }}>{error}</span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ width: '22px', height: '22px', minWidth: '22px', padding: 0, color: 'inherit', opacity: 0.8 }}
+                  onClick={() => setErrorState('')}
+                  title="Tutup pesan error"
+                >
+                  <X size={13} />
+                </button>
               </div>
             )}
             <small style={{ color: '#687b92', fontSize: '11px', display: 'block' }}>
@@ -4978,14 +5089,14 @@ function App() {
             )}
           </div>
           <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
-            <button className="button subtle" disabled={busy} onClick={() => setCompareParameterModalOpen(false)}>
+            <button className="button subtle" disabled={busy} onClick={() => { setErrorState(''); setCompareParameterModalOpen(false) }}>
               Batal
             </button>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 className="button subtle"
                 disabled={busy}
-                onClick={() => setCompareParameterModalOpen(false)}
+                onClick={() => { setErrorState(''); setCompareParameterModalOpen(false) }}
               >
                 Tutup & Simpan Nilai
               </button>
@@ -5000,7 +5111,7 @@ function App() {
                 }}
               >
                 {busy ? <span className="spinner" /> : <GitCompareArrows size={14} />}
-                {busy ? 'Membandingkan Data…' : 'Bandingkan Sekarang'}
+                {busy ? `Membandingkan… (${queryProgress}%)` : 'Bandingkan Sekarang'}
               </button>
             </div>
           </div>
@@ -5292,18 +5403,27 @@ function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div className="ai-provider-status-group">
                 <div
-                  className={`ai-provider-pill ${aiProviderStatus?.primary?.online ? 'online' : aiProviderStatus?.primary?.configured ? 'configured' : 'offline'}`}
-                  title={`Primary: 9Router (${aiProviderStatus?.primary?.model || 'ABAP-Git'}) - ${aiProviderStatus?.primary?.online ? 'Online' : 'Offline / Standby'}`}
+                  className={`ai-provider-pill ${
+                    (aiProviderStatus?.primary?.online || aiProviderStatus?.fallback?.online)
+                      ? 'online'
+                      : (aiProviderStatus?.primary?.configured || aiProviderStatus?.fallback?.configured)
+                      ? 'configured'
+                      : 'offline'
+                  }`}
+                  title={
+                    (aiProviderStatus?.primary?.online || aiProviderStatus?.fallback?.online)
+                      ? 'AI Service siap digunakan'
+                      : 'AI Service sedang offline atau tidak dapat dijangkau'
+                  }
                 >
                   <span className="status-indicator-dot" />
-                  <span>9Router (Primary)</span>
-                </div>
-                <div
-                  className={`ai-provider-pill ${aiProviderStatus?.fallback?.online ? 'online' : aiProviderStatus?.fallback?.configured ? 'configured' : 'offline'}`}
-                  title={`Fallback: OpenRouter (${aiProviderStatus?.fallback?.model || 'openrouter/auto'}) - ${aiProviderStatus?.fallback?.online ? 'Online' : aiProviderStatus?.fallback?.configured ? 'Siap' : 'Belum Dikonfigurasi'}`}
-                >
-                  <span className="status-indicator-dot cloud" />
-                  <span>OpenRouter (Cloud)</span>
+                  <span>
+                    {(aiProviderStatus?.primary?.online || aiProviderStatus?.fallback?.online)
+                      ? 'AI Service Aktif'
+                      : (aiProviderStatus?.primary?.configured || aiProviderStatus?.fallback?.configured)
+                      ? 'AI Service Siap'
+                      : 'AI Service Offline'}
+                  </span>
                 </div>
               </div>
               <button
@@ -5482,7 +5602,7 @@ function App() {
 
                 <div className="ai-loading-footer">
                   <span className="ai-loading-hint">
-                    Penyedia: <strong>{aiProviderStatus?.primary?.online ? '9Router Local Proxy' : 'OpenRouter Cloud'}</strong>
+                    Layanan: <strong>AI Service</strong>
                   </span>
                   <span className="ai-loading-hint">
                     {aiContextMode === 'builder' ? 'Menyusun tabel, relasi join, filter, kalkulasi, & pivot' : 'Menyusun server pembanding & filter perbandingan'}
@@ -5495,7 +5615,7 @@ function App() {
               <div className="ai-result-preview">
                 <div className="ai-result-meta-bar">
                   <span className="ai-provider-used-badge">
-                    <Sparkles size={13} /> Dihasilkan oleh: <strong>{aiResult.provider}</strong>
+                    <Sparkles size={13} /> Dihasilkan oleh: <strong>AI Service Lumina</strong>
                   </span>
                   <span className="ai-ready-badge">
                     <CheckCircle2 size={13} /> Rancangan Siap Diterapkan ke Workspace

@@ -4,6 +4,7 @@ import ast
 import hashlib
 import io
 import json
+import logging
 import math
 import re
 import secrets
@@ -12,6 +13,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
+
+logger = logging.getLogger("lumina")
 
 import httpx
 import pandas as pd
@@ -398,11 +401,12 @@ def match_target(rows: list[dict[str, Any]], target: str) -> dict[str, Any]:
     raise HTTPException(422, f"Target SAP {target} tidak ada dalam katalog.")
 
 
-async def rpc_call(token: str, target: str, name: str, arguments: dict) -> Any:
+async def rpc_call(token: str, target: str, name: str, arguments: dict, timeout: int | None = None) -> Any:
+    rpc_timeout = timeout or settings.sap_rpc_timeout
     payload = {"jsonrpc": "2.0", "id": secrets.token_hex(8), "method": "tools/call",
                "params": {"name": name, "arguments": arguments}}
     try:
-        async with httpx.AsyncClient(timeout=40) as client:
+        async with httpx.AsyncClient(timeout=rpc_timeout) as client:
             res = await client.post(
                 settings.gateway_url,
                 json=payload,
@@ -417,8 +421,16 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict) -> Any:
         data = res.json()
     except HTTPException:
         raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            504,
+            f"Waktu tunggu habis (timeout {rpc_timeout}s) saat membaca SAP [{target}]. "
+            "Server SAP memerlukan waktu lebih lama untuk memproses kueri ini. "
+            "Saran: persempit rentang filter tanggal atau tambahkan filter spesifik (seperti Plant / WERKS, Jenis Order / AUART)."
+        ) from None
     except (httpx.HTTPError, ValueError) as err:
-        raise HTTPException(502, f"MCP Gateway untuk {target} tidak dapat dihubungi: {err}") from None
+        err_detail = str(err) or type(err).__name__
+        raise HTTPException(502, f"MCP Gateway untuk {target} tidak dapat dihubungi: {err_detail}") from None
     if data.get("error"):
         err_msg = str(data["error"].get("message") or data["error"])
         raise HTTPException(502, friendly_sap_error(err_msg, target))
@@ -430,7 +442,13 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict) -> Any:
     return result
 
 
+TOOL_CONTRACT_CACHE: tuple[float, tuple[str, dict[str, Any]]] | None = None
+
+
 async def read_tool_contract(token: str) -> tuple[str, dict[str, Any]]:
+    global TOOL_CONTRACT_CACHE
+    if TOOL_CONTRACT_CACHE and TOOL_CONTRACT_CACHE[0] > time.monotonic():
+        return TOOL_CONTRACT_CACHE[1]
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             res = await client.post(
@@ -441,14 +459,21 @@ async def read_tool_contract(token: str) -> tuple[str, dict[str, Any]]:
             )
         fail_upstream(res, "MCP Gateway")
         payload = res.json()
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(502, "Daftar tool MCP Gateway tidak tersedia.") from None
+    except (httpx.HTTPError, ValueError) as err:
+        if TOOL_CONTRACT_CACHE:
+            return TOOL_CONTRACT_CACHE[1]
+        err_detail = str(err) or type(err).__name__
+        raise HTTPException(502, f"Daftar tool MCP Gateway tidak tersedia: {err_detail}") from None
     result = payload.get("result", {})
     tools = result.get("tools", [])
     for wanted in ("mcp-sap__read_table", "mcp-sap__abap_read_table"):
         tool = next((t for t in tools if t.get("name") == wanted), None)
         if tool:
-            return wanted, tool.get("inputSchema") or {}
+            contract = (wanted, tool.get("inputSchema") or {})
+            TOOL_CONTRACT_CACHE = (time.monotonic() + 3600, contract)
+            return contract
+    if TOOL_CONTRACT_CACHE:
+        return TOOL_CONTRACT_CACHE[1]
     partial = " ".join(result.get("_gatewayPartialErrors", []))
     if "mcp-sap" in partial:
         raise HTTPException(503, "Upstream mcp-sap belum tersedia di MCP Gateway.")
@@ -647,8 +672,8 @@ async def get_structure(token: str, target: dict[str, Any], table_name: str) -> 
             for field in fields:
                 field["description"] = field.get("description") or texts_by_rollname.get(rollnames.get(field["name"], ""), "")
     fields.sort(key=lambda field: (field.get("position") is None, field.get("position") or 0))
-    # Cache for 1 hour (3600 seconds)
-    STRUCTURE_CACHE[cache_key] = (time.monotonic() + 3600, ([dict(f) for f in fields], raw))
+    # Cache for 24 hours (86400 seconds)
+    STRUCTURE_CACHE[cache_key] = (time.monotonic() + 86400, ([dict(f) for f in fields], raw))
     return fields, raw
 
 
@@ -787,6 +812,10 @@ async def read_rows(dto: ReadIn, token: str) -> list[dict[str, Any]]:
     }
     if where:
         arguments["where"] = where
+    if "timeout_ms" in properties:
+        arguments["timeout_ms"] = settings.sap_rpc_timeout * 1000
+    if "batch_size" in properties and dto.rowcount:
+        arguments["batch_size"] = min(dto.rowcount, 1000)
     result = await rpc_call(token, dto.target, name, arguments)
     return unpack_rows(result)
 
@@ -1055,10 +1084,16 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
     metadata: dict[str, dict[str, dict[str, Any]]] = {}
     warnings = []
     for source in dto.sources:
-        fields, _ = await get_structure(token, target, source.table_name)
+        try:
+            fields, _ = await get_structure(token, target, source.table_name)
+        except HTTPException as err:
+            logger.warning("Gagal mengambil struktur untuk %s: %s", source.table_name, err.detail)
+            fields = []
+            warnings.append(f"Struktur {source.table_name} tidak dapat diambil ({err.detail}); verifikasi field dilakukan oleh SAP saat baca.")
         metadata[source.alias] = {field["name"]: field for field in fields}
         if not fields:
-            warnings.append(f"Struktur {source.table_name} tidak dapat diparsing; verifikasi field dilakukan oleh SAP saat baca.")
+            if not any(source.table_name in w for w in warnings):
+                warnings.append(f"Struktur {source.table_name} tidak dapat diparsing; verifikasi field dilakukan oleh SAP saat baca.")
             continue
         requested = {field.upper() for field in source.fields}
         requested |= {item.field.upper() for item in source.filters if item.value.strip()}
@@ -1081,44 +1116,53 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
 
         chunk_col = None
         chunk_batches: list[list[str]] = []
+        skip_fetch = False
         if source_idx > 0:
-            for join in dto.joins:
-                if join.right_alias == source.alias and join.left_alias in frames:
-                    left_df = frames[join.left_alias]
-                    conditions = join.conditions or ([JoinConditionIn(left_field=join.left_field, right_field=join.right_field)]
-                                                     if join.left_field and join.right_field else [])
-                    for cond in conditions:
-                        left_col = f"{join.left_alias}.{cond.left_field.upper()}"
-                        right_col = cond.right_field.upper()
-                        has_upstream_data = len(left_df) > 0
-                        if has_upstream_data and not any(f.field.upper() == right_col for f in source_filters) and left_col in left_df.columns:
-                            distinct_vals = [
-                                str(v).strip() for v in left_df[left_col].dropna().unique()
-                                if str(v).strip() and str(v).strip() != "0"
-                            ]
-                            if len(distinct_vals) == 1:
-                                source_filters.append(FilterIn(field=right_col, operator="EQ", value=distinct_vals[0]))
-                            elif 1 < len(distinct_vals) <= 30 - len(source_filters):
-                                source_filters.extend(
-                                    FilterIn(field=right_col, operator="EQ", value=value)
-                                    for value in distinct_vals
-                                )
-                            elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
-                                chunk_col = right_col
-                                max_keys = 300
-                                if len(distinct_vals) > max_keys:
-                                    warnings.append(
-                                        f"Kunci join {cond.left_field} melebihi {max_keys} ({len(distinct_vals)} unik). Mengambil data untuk {max_keys} kunci pertama."
+            if len(frames[dto.sources[0].alias]) == 0:
+                skip_fetch = True
+            else:
+                for join in dto.joins:
+                    if join.right_alias == source.alias and join.left_alias in frames:
+                        left_df = frames[join.left_alias]
+                        if join.how == "inner" and len(left_df) == 0:
+                            skip_fetch = True
+                            break
+                        conditions = join.conditions or ([JoinConditionIn(left_field=join.left_field, right_field=join.right_field)]
+                                                         if join.left_field and join.right_field else [])
+                        for cond in conditions:
+                            left_col = f"{join.left_alias}.{cond.left_field.upper()}"
+                            right_col = cond.right_field.upper()
+                            has_upstream_data = len(left_df) > 0
+                            if has_upstream_data and not any(f.field.upper() == right_col for f in source_filters) and left_col in left_df.columns:
+                                distinct_vals = [
+                                    str(v).strip() for v in left_df[left_col].dropna().unique()
+                                    if str(v).strip() and str(v).strip() != "0"
+                                ]
+                                if len(distinct_vals) == 1:
+                                    source_filters.append(FilterIn(field=right_col, operator="EQ", value=distinct_vals[0]))
+                                elif 1 < len(distinct_vals) <= 30 - len(source_filters):
+                                    source_filters.extend(
+                                        FilterIn(field=right_col, operator="EQ", value=value)
+                                        for value in distinct_vals
                                     )
-                                capped = distinct_vals[:max_keys]
-                                chunk_batches = [capped[i:i + 25] for i in range(0, len(capped), 25)]
-                            elif len(distinct_vals) == 0 and len(left_df) > 0:
-                                warnings.append(
-                                    f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
-                                )
+                                elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
+                                    chunk_col = right_col
+                                    max_keys = 300
+                                    if len(distinct_vals) > max_keys:
+                                        warnings.append(
+                                            f"Kunci join {cond.left_field} melebihi {max_keys} ({len(distinct_vals)} unik). Mengambil data untuk {max_keys} kunci pertama."
+                                        )
+                                    capped = distinct_vals[:max_keys]
+                                    chunk_batches = [capped[i:i + 25] for i in range(0, len(capped), 25)]
+                                elif len(distinct_vals) == 0 and len(left_df) > 0:
+                                    warnings.append(
+                                        f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
+                                    )
 
         downstream_limit = 5000
-        if chunk_batches and chunk_col:
+        if skip_fetch:
+            rows: list[dict[str, Any]] = []
+        elif chunk_batches and chunk_col:
             rows: list[dict[str, Any]] = []
             for batch in chunk_batches:
                 batch_filters = list(source_filters) + [FilterIn(field=chunk_col, operator="EQ", value=v) for v in batch]
@@ -1152,7 +1196,7 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
         for condition, left_key, right_key in zip(conditions, left_keys, right_keys):
             left_meta = metadata.get(join.left_alias, {}).get(condition.left_field.upper())
             right_meta = metadata.get(join.right_alias, {}).get(condition.right_field.upper())
-            if left_meta and right_meta and left_meta["data_type"] and right_meta["data_type"]:
+            if left_meta and right_meta and left_meta.get("data_type") and right_meta.get("data_type"):
                 if left_meta["data_type"].upper() != right_meta["data_type"].upper():
                     raise HTTPException(422, f"Tipe field join {left_key} dan {right_key} berbeda.")
         left_counts = merged[left_keys].astype(str).value_counts(dropna=False)

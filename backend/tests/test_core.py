@@ -1,8 +1,8 @@
 import io
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+import httpx
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -556,8 +556,67 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_report.name, "New Report Name")
         mock_db.commit.assert_called_once()
 
+    async def test_rpc_call_timeout_raises_504(self):
+        with patch("httpx.AsyncClient.post", side_effect=httpx.ReadTimeout("timed out")):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.rpc_call("tok", "conn-dev", "mcp-sap__read_table", {"table": "AUFK"})
+            self.assertEqual(ctx.exception.status_code, 504)
+            self.assertIn("Waktu tunggu habis", ctx.exception.detail)
+
+    async def test_execute_query_skips_downstream_when_base_empty(self):
+        async def structure(_token, _target, table):
+            return [{"name": "AUFNR"}, {"name": "WERKS"}, {"name": "MATNR"}], "raw"
+
+        read_rows_calls = []
+        async def mock_read_rows(dto, _token):
+            read_rows_calls.append(dto.table_name)
+            if dto.table_name == "AUFK":
+                return []
+            return [{"MATNR": "MAT1", "AUFNR": "100"}]
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR", "WERKS"]),
+                main.SourceIn(alias="T2", table_name="AFPO", fields=["MATNR"]),
+            ],
+            joins=[main.JoinIn(left_alias="T1", left_field="AUFNR",
+                               right_alias="T2", right_field="AUFNR")],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=mock_read_rows)):
+            result = await main.execute_query(query, "user-token")
+        self.assertEqual(len(result["rows"]), 0)
+        # Verify that AFPO was never queried because AUFK was empty!
+        self.assertEqual(read_rows_calls, ["AUFK"])
+
+    async def test_execute_query_structure_failure_proceeds_with_warning(self):
+        async def failing_structure(_token, _target, table):
+            raise main.HTTPException(502, f"MCP Gateway timeout reading structure for {table}")
+
+        async def mock_read_rows(dto, _token):
+            return [{"AUFNR": "1000", "WERKS": "1100"}]
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR", "WERKS"]),
+            ],
+            joins=[],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=failing_structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=mock_read_rows)):
+            result = await main.execute_query(query, "user-token")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertTrue(any("Struktur AUFK tidak dapat diambil" in w for w in result["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

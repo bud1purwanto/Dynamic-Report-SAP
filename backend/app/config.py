@@ -40,6 +40,7 @@ class Settings:
     openrouter_api_key: str
     openrouter_model: str
     openrouter_fallback_model: str
+    sap_rpc_timeout: int
 
 
 def get_settings() -> Settings:
@@ -77,6 +78,7 @@ def get_settings() -> Settings:
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openrouter/auto").strip(),
         openrouter_fallback_model=os.getenv("OPENROUTER_FALLBACK_MODEL", "openrouter/free").strip(),
+        sap_rpc_timeout=int(os.getenv("SAP_RPC_TIMEOUT", "120")),
     )
 
 

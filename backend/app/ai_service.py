@@ -120,10 +120,10 @@ async def query_llm_with_fallback(
                 timeout=timeout,
                 response_format={"type": "json_object"},
             )
-            return content, f"9Router ({settings.nine_router_model})"
+            return content, "AI Service"
         except Exception as exc:
-            err_msg = f"9Router gagal: {exc}"
-            logger.warning(err_msg)
+            err_msg = f"Layanan AI utama gagal: {exc}"
+            logger.warning("9Router gagal: %s", exc)
             errors.append(err_msg)
 
     # 2. Try OpenRouter (Fallback / Cloud)
@@ -145,10 +145,10 @@ async def query_llm_with_fallback(
                     timeout=timeout,
                     response_format={"type": "json_object"},
                 )
-                return content, f"OpenRouter ({or_model})"
+                return content, "AI Service"
             except Exception as exc:
-                err_msg = f"OpenRouter ({or_model}) gagal: {exc}"
-                logger.warning(err_msg)
+                err_msg = f"Layanan AI cadangan gagal: {exc}"
+                logger.warning("OpenRouter (%s) gagal: %s", or_model, exc)
                 errors.append(err_msg)
 
     # 3. Optional Local Ollama fallback if configured
@@ -168,27 +168,27 @@ async def query_llm_with_fallback(
                 )
                 res.raise_for_status()
                 content = res.json()["message"]["content"].strip()
-                return content, f"Ollama ({settings.ollama_model})"
+                return content, "AI Service"
         except Exception as exc:
-            err_msg = f"Ollama gagal: {exc}"
-            logger.warning(err_msg)
+            err_msg = f"Layanan AI lokal gagal: {exc}"
+            logger.warning("Ollama gagal: %s", exc)
             errors.append(err_msg)
 
-    raise RuntimeError("Semua penyedia AI (9Router, OpenRouter, Ollama) gagal atau belum dikonfigurasi: " + " | ".join(errors))
+    raise RuntimeError("Layanan AI sedang tidak tersedia atau belum dikonfigurasi: " + " | ".join(errors))
 
 
 async def check_ai_providers_status() -> dict[str, Any]:
     """Check connectivity and readiness of AI providers."""
     status: dict[str, Any] = {
         "primary": {
-            "name": "9Router (Local Proxy)",
+            "name": "AI Service",
             "endpoint": settings.nine_router_base_url,
             "model": settings.nine_router_model,
             "configured": bool(settings.nine_router_base_url),
             "online": False,
         },
         "fallback": {
-            "name": "OpenRouter (Cloud)",
+            "name": "AI Service (Cadangan)",
             "endpoint": settings.openrouter_base_url,
             "model": settings.openrouter_model,
             "configured": bool(settings.openrouter_api_key),
