@@ -11,7 +11,8 @@ import secrets
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import quote
 
 logger = logging.getLogger("lumina")
@@ -31,7 +32,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, ReportShare, Variant, auth_engine, get_db, init_db, utcnow
+from .db import AppSession, CompareVariant, Report, ReportRun, ReportSchedule, ReportShare, SessionLocal, Variant, auth_engine, get_db, init_db, utcnow
 
 
 app = FastAPI(title="Lumina Dynamic Report", version="0.1.0")
@@ -126,8 +127,8 @@ class ReadIn(BaseModel):
     target: str = Field(min_length=1)
     table_name: str
     fields: list[str] = Field(min_length=1, max_length=100)
-    filters: list[FilterIn] = Field(default_factory=list, max_length=100)
-    rowcount: int = Field(default=100, ge=1, le=50000)
+    filters: list[FilterIn] = Field(default_factory=list, max_length=1000)
+    rowcount: int = Field(default=0, ge=0)
 
 
 class StructureIn(BaseModel):
@@ -142,7 +143,7 @@ class TableSearchIn(BaseModel):
 
 
 class PivotIn(BaseModel):
-    rows: list[dict[str, Any]] = Field(max_length=10000)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
     index: list[str] | str
     columns: str
     values: str
@@ -151,7 +152,7 @@ class PivotIn(BaseModel):
 
 
 class CalculatedColumnIn(BaseModel):
-    rows: list[dict[str, Any]] = Field(max_length=10000)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
     name: str
     operation: str = "custom"
     fields: list[str] = Field(default_factory=list, max_length=50)
@@ -159,7 +160,7 @@ class CalculatedColumnIn(BaseModel):
 
 
 class FormulaIn(BaseModel):
-    rows: list[dict[str, Any]] = Field(max_length=10000)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
     name: str
     expression: str = Field(min_length=1, max_length=500)
 
@@ -169,7 +170,7 @@ class CompareIn(BaseModel):
     other_target: str = Field(min_length=1)
     table_name: str
     filters: list[FilterIn] = Field(default_factory=list, max_length=10)
-    rowcount: int = Field(default=100, ge=1, le=50000)
+    rowcount: int = Field(default=0, ge=0)
 
 
 class SourceIn(BaseModel):
@@ -197,7 +198,7 @@ class QueryIn(BaseModel):
     target: str
     sources: list[SourceIn] = Field(min_length=1, max_length=50)
     joins: list[JoinIn] = []
-    rowcount: int = Field(default=100, ge=1, le=50000)
+    rowcount: int = Field(default=0, ge=0)
     report_id: str | None = None
 
 
@@ -226,7 +227,7 @@ class CompareVariantIn(BaseModel):
 
 
 class ExportIn(BaseModel):
-    rows: list[dict[str, Any]] = Field(max_length=10000)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
     mask_fields: list[str] = []
     drop_duplicates: bool = False
 
@@ -1105,7 +1106,20 @@ async def search_tables(dto: TableSearchIn, auth: tuple[AppSession, str] = Depen
     return {"tables": popular_matches[:dto.limit]}
 
 
-async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
+TokenSource = str | Callable[[], Awaitable[str]]
+ProgressCallback = Callable[[float, str], None]
+
+
+async def execute_query(dto: QueryIn, token: TokenSource,
+                        progress: ProgressCallback | None = None) -> dict[str, Any]:
+    async def current_token() -> str:
+        # Job panjang memakai penyedia token agar token OIDC diperbarui di tengah jalan.
+        return token if isinstance(token, str) else await token()
+
+    def report(percent: float, text: str) -> None:
+        if progress:
+            progress(max(0.0, min(99.0, percent)), text)
+
     aliases = [s.alias for s in dto.sources]
     if len(aliases) != len(set(aliases)) or any(not IDENT.fullmatch(a) for a in aliases):
         raise HTTPException(422, "Alias tabel harus unik dan valid.")
@@ -1113,12 +1127,13 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
         raise HTTPException(422, "Setiap tabel tambahan memerlukan satu join.")
     if not any(source.fields for source in dto.sources):
         raise HTTPException(422, "Pilih setidaknya satu kolom untuk ditampilkan.")
-    target = match_target(await user_catalog(token), dto.target)
+    report(2, "Memeriksa struktur tabel SAP…")
+    target = match_target(await user_catalog(await current_token()), dto.target)
     metadata: dict[str, dict[str, dict[str, Any]]] = {}
     warnings = []
     for source in dto.sources:
         try:
-            fields, _ = await get_structure(token, target, source.table_name)
+            fields, _ = await get_structure(await current_token(), target, source.table_name)
         except HTTPException as err:
             logger.warning("Gagal mengambil struktur untuk %s: %s", source.table_name, err.detail)
             fields = []
@@ -1139,7 +1154,10 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
         if unknown:
             raise HTTPException(422, f"Field tidak ada di {source.table_name}: {', '.join(sorted(unknown))}")
     frames = {}
+    source_span = 90 / len(dto.sources)
     for source_idx, source in enumerate(dto.sources):
+        source_start = 5 + source_idx * source_span
+        report(source_start, f"Membaca {source.table_name} ({source_idx + 1}/{len(dto.sources)})…")
         join_fields = [condition.left_field for join in dto.joins if join.left_alias == source.alias
                        for condition in (join.conditions or [JoinConditionIn(left_field=join.left_field, right_field=join.right_field)])]
         join_fields += [condition.right_field for join in dto.joins if join.right_alias == source.alias
@@ -1180,38 +1198,74 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
                                     )
                                 elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
                                     chunk_col = right_col
-                                    max_keys = 300
-                                    if len(distinct_vals) > max_keys:
-                                        warnings.append(
-                                            f"Kunci join {cond.left_field} melebihi {max_keys} ({len(distinct_vals)} unik). Mengambil data untuk {max_keys} kunci pertama."
-                                        )
-                                    capped = distinct_vals[:max_keys]
-                                    chunk_batches = [capped[i:i + 25] for i in range(0, len(capped), 25)]
+                                    # Semua kunci diproses; batch disesuaikan agar total filter
+                                    # per panggilan tetap dalam batas ReadIn.
+                                    batch_size = max(1, min(settings.join_key_batch_size,
+                                                            1000 - len(source_filters)))
+                                    chunk_batches = [distinct_vals[i:i + batch_size]
+                                                     for i in range(0, len(distinct_vals), batch_size)]
                                 elif len(distinct_vals) == 0 and len(left_df) > 0:
                                     warnings.append(
                                         f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
                                     )
 
-        downstream_limit = 5000
+        downstream_limit = dto.rowcount if dto.rowcount > 0 else 0
         if skip_fetch:
             rows: list[dict[str, Any]] = []
         elif chunk_batches and chunk_col:
-            rows: list[dict[str, Any]] = []
-            for batch in chunk_batches:
-                batch_filters = list(source_filters) + [FilterIn(field=chunk_col, operator="EQ", value=v) for v in batch]
-                batch_rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
-                                                    fields=fields, filters=batch_filters,
-                                                    rowcount=downstream_limit), token)
-                rows.extend(batch_rows)
-                if len(rows) >= 10000:
-                    break
+            semaphore = asyncio.Semaphore(settings.join_fetch_concurrency)
+            completed = 0
+
+            async def fetch_batch(batch: list[str]) -> list[dict[str, Any]]:
+                nonlocal completed
+                async with semaphore:
+                    batch_filters = list(source_filters) + [FilterIn(field=chunk_col, operator="EQ", value=v) for v in batch]
+                    batch_rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
+                                                        fields=fields, filters=batch_filters,
+                                                        rowcount=downstream_limit), await current_token())
+                completed += 1
+                report(source_start + source_span * completed / len(chunk_batches),
+                       f"Membaca {source.table_name}: batch {completed:,}/{len(chunk_batches):,} "
+                       f"({completed * 100 // len(chunk_batches)}%)")
+                return batch_rows
+
+            # TaskGroup membatalkan batch lain bila satu batch gagal.
+            try:
+                async with asyncio.TaskGroup() as group:
+                    tasks = [group.create_task(fetch_batch(batch)) for batch in chunk_batches]
+            except ExceptionGroup as group_err:
+                raise group_err.exceptions[0] from None
+            rows = [row for task in tasks for row in task.result()]
         else:
-            fetch_limit = dto.rowcount if source_idx == 0 else downstream_limit
+            fetch_limit = dto.rowcount
             rows = await read_rows(ReadIn(target=dto.target, table_name=source.table_name,
                                           fields=fields, filters=source_filters,
-                                          rowcount=fetch_limit), token)
+                                          rowcount=fetch_limit), await current_token())
         frames[source.alias] = pd.DataFrame(rows, columns=fields).rename(
             columns={field: f"{source.alias}.{field}" for field in fields})
+
+        # Prune rows in downstream table that do not match upstream join keys.
+        # This prevents fan-out where intermediate tables with loose or single-key filters
+        # explode in size and cause subsequent joins to fetch tens of thousands of unrelated keys.
+        for join in dto.joins:
+            if join.right_alias == source.alias and join.left_alias in frames:
+                left_df = frames[join.left_alias]
+                if len(left_df) > 0 and len(frames[source.alias]) > 0:
+                    conditions = join.conditions or ([JoinConditionIn(left_field=join.left_field, right_field=join.right_field)]
+                                                     if join.left_field and join.right_field else [])
+                    left_keys = [f"{join.left_alias}.{c.left_field.upper()}" for c in conditions]
+                    right_keys = [f"{source.alias}.{c.right_field.upper()}" for c in conditions]
+                    if all(k in left_df.columns for k in left_keys) and all(k in frames[source.alias].columns for k in right_keys):
+                        if len(left_keys) == 1:
+                            s_left = set(left_df[left_keys[0]].dropna().astype(str).str.strip())
+                            s_right = frames[source.alias][right_keys[0]].astype(str).str.strip()
+                            frames[source.alias] = frames[source.alias][s_right.isin(s_left)].reset_index(drop=True)
+                        else:
+                            left_tuples = set(zip(*[left_df[k].astype(str).str.strip() for k in left_keys]))
+                            right_tuples = list(zip(*[frames[source.alias][k].astype(str).str.strip() for k in right_keys]))
+                            mask = [t in left_tuples for t in right_tuples]
+                            frames[source.alias] = frames[source.alias][mask].reset_index(drop=True)
+    report(96, "Menggabungkan data antar tabel…")
     merged = frames[dto.sources[0].alias]
     included = {dto.sources[0].alias}
     for index, source in enumerate(dto.sources[1:]):
@@ -1232,17 +1286,8 @@ async def execute_query(dto: QueryIn, token: str) -> dict[str, Any]:
             if left_meta and right_meta and left_meta.get("data_type") and right_meta.get("data_type"):
                 if left_meta["data_type"].upper() != right_meta["data_type"].upper():
                     raise HTTPException(422, f"Tipe field join {left_key} dan {right_key} berbeda.")
-        left_counts = merged[left_keys].astype(str).value_counts(dropna=False)
-        right_counts = frames[source.alias][right_keys].astype(str).value_counts(dropna=False)
-        estimated = sum(int(count) * max(1 if join.how == "left" else 0,
-                                        int(right_counts.get(key, 0)))
-                        for key, count in left_counts.items())
-        if estimated > 10000:
-            raise HTTPException(422, "Hasil join diperkirakan melebihi 10.000 baris. Persempit data.")
         merged = merged.merge(frames[source.alias], left_on=left_keys, right_on=right_keys,
                               how=join.how, validate="many_to_many")
-        if len(merged) > 10000:
-            raise HTTPException(422, "Hasil join melebihi 10.000 baris. Persempit data.")
         included.add(source.alias)
     output_columns = [f"{source.alias}.{field.upper()}" for source in dto.sources for field in source.fields]
     rows = json.loads(merged[output_columns].to_json(orient="records", date_format="iso"))
@@ -1262,33 +1307,151 @@ def check_report_share_access(db: Session, report_id: str, user_id: str, usernam
     ).first()
 
 
+def accessible_report_id(db: Session, report_id: str | None, session: AppSession) -> str | None:
+    if not report_id:
+        return None
+    report = db.get(Report, report_id)
+    current_username = (session.user_profile.get("username", "") if isinstance(session.user_profile, dict) else "").strip()
+    has_share = check_report_share_access(db, report_id, session.user_id, current_username) if report else None
+    if not report or (report.owner_id != session.user_id and not has_share):
+        return None
+    return report_id
+
+
+def record_query_run(db: Session, owner_id: str, report_id: str | None, dto: QueryIn,
+                     status: str, row_count: int = 0, error: str | None = None) -> None:
+    db.add(ReportRun(owner_id=owner_id, report_id=report_id, definition=dto.model_dump(),
+                     status=status, row_count=row_count, error=error[:500] if error else None))
+    db.commit()
+
+
+async def execute_query_logged(dto: QueryIn, token: str, owner_id: str, report_id: str | None,
+                               db: Session) -> dict[str, Any]:
+    try:
+        result = await execute_query(dto, token)
+    except HTTPException as exc:
+        record_query_run(db, owner_id, report_id, dto, "error", error=str(exc.detail))
+        raise
+    except Exception as exc:
+        err_msg = str(exc) or type(exc).__name__
+        record_query_run(db, owner_id, report_id, dto, "error", error=err_msg)
+        raise HTTPException(500, f"Terjadi kesalahan saat mengeksekusi query: {err_msg}") from exc
+    record_query_run(db, owner_id, report_id, dto, "success", row_count=len(result["rows"]))
+    return result
+
+
 @app.post("/api/sap/query")
 async def run_query(dto: QueryIn, auth: tuple[AppSession, str] = Depends(get_token),
                     db: Session = Depends(get_db)):
-    report_id = dto.report_id
-    if report_id:
-        report = db.get(Report, report_id)
-        current_username = (auth[0].user_profile.get("username", "") if isinstance(auth[0].user_profile, dict) else "").strip()
-        has_share = check_report_share_access(db, report_id, auth[0].user_id, current_username) if report else None
-        if not report or (report.owner_id != auth[0].user_id and not has_share):
-            report_id = None
-    try:
-        result = await execute_query(dto, auth[1])
-    except HTTPException as exc:
-        db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
-                         status="error", error=str(exc.detail)[:500]))
-        db.commit()
-        raise
-    except Exception as exc:
-        err_msg = str(exc)
-        db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
-                         status="error", error=err_msg[:500]))
-        db.commit()
-        raise HTTPException(500, f"Terjadi kesalahan saat mengeksekusi query: {err_msg}") from exc
-    db.add(ReportRun(owner_id=auth[0].user_id, report_id=report_id, definition=dto.model_dump(),
-                     status="success", row_count=len(result["rows"])))
-    db.commit()
-    return result
+    report_id = accessible_report_id(db, dto.report_id, auth[0])
+    return await execute_query_logged(dto, auth[1], auth[0].user_id, report_id, db)
+
+
+# Query besar dijalankan sebagai job latar agar request HTTP tidak tertahan
+# sampai timeout browser/proxy. Disimpan di memori: jalankan uvicorn dengan satu proses.
+QUERY_JOBS: dict[str, dict[str, Any]] = {}
+QUERY_JOB_TTL_SECONDS = 3600
+QUERY_JOB_TOKEN_REUSE_SECONDS = 60
+
+
+def prune_query_jobs() -> None:
+    cutoff = time.monotonic() - QUERY_JOB_TTL_SECONDS
+    for job_id in [k for k, job in QUERY_JOBS.items() if job["updated"] < cutoff]:
+        job = QUERY_JOBS.pop(job_id)
+        if not job["task"].done():
+            job["task"].cancel()
+
+
+def session_token_provider(cookie: str) -> Callable[[], Awaitable[str]]:
+    cached: dict[str, Any] = {"token": None, "at": 0.0}
+    fake_request = SimpleNamespace(cookies={settings.cookie_name: cookie})
+
+    async def provide() -> str:
+        if cached["token"] and time.monotonic() - cached["at"] < QUERY_JOB_TOKEN_REUSE_SECONDS:
+            return cached["token"]
+        # get_token memperbarui token OIDC bila hampir kedaluwarsa.
+        with SessionLocal() as db:
+            _, token = await get_token(fake_request, None, db)
+        cached.update(token=token, at=time.monotonic())
+        return token
+
+    return provide
+
+
+@app.post("/api/sap/query/jobs")
+async def start_query_job(dto: QueryIn, request: Request, auth: tuple[AppSession, str] = Depends(get_token),
+                          db: Session = Depends(get_db)):
+    prune_query_jobs()
+    report_id = accessible_report_id(db, dto.report_id, auth[0])
+    owner_id = auth[0].user_id
+    job_id = secrets.token_urlsafe(16)
+    job: dict[str, Any] = {"owner_id": owner_id, "status": "running", "progress": 0.0,
+                           "message": "Menyiapkan query…", "result": None, "error": None,
+                           "error_status": None, "updated": time.monotonic()}
+
+    def on_progress(percent: float, text: str) -> None:
+        job.update(progress=round(percent, 1), message=text, updated=time.monotonic())
+
+    def record(status: str, row_count: int = 0, error: str | None = None) -> None:
+        # Sesi DB singkat: job panjang tidak boleh menahan koneksi pool.
+        with SessionLocal() as job_db:
+            record_query_run(job_db, owner_id, report_id, dto, status, row_count, error)
+
+    async def run() -> None:
+        token_provider = session_token_provider(request.cookies.get(settings.cookie_name, ""))
+        try:
+            result = await execute_query(dto, token_provider, on_progress)
+        except HTTPException as exc:
+            await asyncio.to_thread(record, "error", 0, str(exc.detail))
+            job.update(status="error", error=str(exc.detail), error_status=exc.status_code)
+        except asyncio.CancelledError:
+            job.update(status="cancelled", error="Query dibatalkan.")
+            raise
+        except Exception as exc:
+            logger.exception("Query job %s gagal", job_id)
+            err_msg = str(exc) or type(exc).__name__
+            await asyncio.to_thread(record, "error", 0, err_msg)
+            job.update(status="error", error=f"Terjadi kesalahan saat mengeksekusi query: {err_msg}",
+                       error_status=500)
+        else:
+            await asyncio.to_thread(record, "success", len(result["rows"]))
+            job.update(status="success", progress=100.0, message="Selesai", result=result)
+        finally:
+            job["updated"] = time.monotonic()
+
+    job["task"] = asyncio.create_task(run())
+    QUERY_JOBS[job_id] = job
+    return {"job_id": job_id}
+
+
+def owned_query_job(job_id: str, session: AppSession) -> dict[str, Any]:
+    job = QUERY_JOBS.get(job_id)
+    if not job or job["owner_id"] != session.user_id:
+        raise HTTPException(404, "Job query tidak ditemukan. Server mungkin dimulai ulang saat query berjalan; silakan jalankan query kembali.")
+    return job
+
+
+@app.get("/api/sap/query/jobs/{job_id}")
+async def query_job_status(job_id: str, auth: tuple[AppSession, str] = Depends(get_token)):
+    job = owned_query_job(job_id, auth[0])
+    payload = {"status": job["status"], "progress": job["progress"], "message": job["message"]}
+    if job["status"] == "success":
+        payload["result"] = job["result"]
+        QUERY_JOBS.pop(job_id, None)
+    elif job["status"] in ("error", "cancelled"):
+        payload["error"] = job["error"]
+        payload["error_status"] = job["error_status"]
+        QUERY_JOBS.pop(job_id, None)
+    return payload
+
+
+@app.delete("/api/sap/query/jobs/{job_id}")
+async def cancel_query_job(job_id: str, auth: tuple[AppSession, str] = Depends(get_token)):
+    job = owned_query_job(job_id, auth[0])
+    if not job["task"].done():
+        job["task"].cancel()
+    QUERY_JOBS.pop(job_id, None)
+    return {"cancelled": True}
 
 
 from .ai_service import check_ai_providers_status, query_llm_with_fallback
@@ -1316,7 +1479,7 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             '  "target": "target_id_sumber",\n'
             '  "other_target": "target_id_pembanding",\n'
             '  "table_name": "NAMA_TABEL_SAP",\n'
-            '  "rowcount": 100,\n'
+            '  "rowcount": 0,\n'
             '  "filters": [\n'
             '    {"field": "FIELDNAME", "operator": "EQ|BT|NE|GT|GE|LT|LE", "value": "val1", "high_value": "val2", "sign": "I|E"}\n'
             "  ]\n"
@@ -1338,7 +1501,7 @@ async def ai_generate(dto: AiFullAssistantIn, auth: tuple[AppSession, str] = Dep
             "{\n"
             '  "explanation": "Penjelasan singkat arsitektur query dan langkah yang diambil",\n'
             '  "target": "target_id",\n'
-            '  "rowcount": 100,\n'
+            '  "rowcount": 0,\n'
             '  "sources": [\n'
             '    {\n'
             '      "alias": "T1",\n'
@@ -1887,7 +2050,7 @@ async def compare(dto: CompareIn, auth: tuple[AppSession, str] = Depends(get_tok
                                "changed" if changed_fields else "same",
                      "changed_fields": changed_fields, "left": old, "right": new})
     # A full page may have more rows behind it; the gateway read contract has no cursor.
-    complete = len(left) < dto.rowcount and len(right) < dto.rowcount
+    complete = (len(left) < dto.rowcount and len(right) < dto.rowcount) if dto.rowcount > 0 else True
     return {"left_count": len(left), "right_count": len(right), "rows": rows,
             "fields": fields, "key_fields": keys, "complete": complete, "row_limit": dto.rowcount}
 

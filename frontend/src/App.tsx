@@ -8,7 +8,7 @@ import {
   Edit2, Eye, Filter, GitCompareArrows, GripVertical, KeyRound, Layers3, Lock, LogOut, Maximize2, Minimize2, MoreVertical, PanelLeftClose, PanelLeftOpen,
   Play, Plus, RotateCcw, RotateCw, Save, Scan, Search, Settings2, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, UserCheck, UserPlus, Users, X,
 } from 'lucide-react'
-import { api, post } from './api'
+import { api, isAbortError, post, runQueryJob } from './api'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
 
 type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
@@ -424,7 +424,7 @@ function suggestedConditions(left: StructureField[], right: StructureField[]): J
 const blankSource = (index: number): Source => ({
   alias: `T${index + 1}`, table_name: '', fields: [], filters: [],
 })
-const initialQuery: Query = { target: '', sources: [blankSource(0)], joins: [], rowcount: 100 }
+const initialQuery: Query = { target: '', sources: [blankSource(0)], joins: [], rowcount: 0 }
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -433,6 +433,10 @@ function App() {
   const [queryProgress, setQueryProgress] = useState(0)
   const [queryProgressText, setQueryProgressText] = useState('')
   const [queryElapsedSeconds, setQueryElapsedSeconds] = useState(0)
+  // Diisi saat server mengirim progress nyata; animasi estimasi berhenti mengambil alih.
+  const serverProgressRef = useRef(false)
+  const queryAbortRef = useRef<AbortController | null>(null)
+  const [queryCancellable, setQueryCancellable] = useState(false)
 
   useEffect(() => {
     if (!busy) {
@@ -450,6 +454,7 @@ function App() {
     const timer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000)
       setQueryElapsedSeconds(elapsed)
+      if (serverProgressRef.current) return
 
       setQueryProgress(prev => {
         if (prev >= 98) return prev
@@ -593,7 +598,7 @@ function App() {
       setErrorState('')
     }
   }, [compareParameterModalOpen])
-  const [compareRowcount, setCompareRowcount] = useState(100)
+  const [compareRowcount, setCompareRowcount] = useState(0)
   const [compareResult, setCompareResult] = useState<{ left_count: number; right_count: number; complete: boolean; row_limit: number; fields: string[]; key_fields: string[] } | null>(null)
   const [compareRows, setCompareRows] = useState<CompareRow[]>([])
   const [compareView, setCompareView] = useState<'all' | 'same' | 'different'>('all')
@@ -1315,7 +1320,7 @@ function App() {
       const targetServer = (aiData.target && servers.some(s => s.id === aiData.target))
         ? aiData.target
         : (query.target || servers[0]?.id || '')
-      const newRowcount = Number(aiData.rowcount) || query.rowcount || 100
+      const newRowcount = (aiData.rowcount !== undefined && !Number.isNaN(Number(aiData.rowcount))) ? Number(aiData.rowcount) : (query.rowcount ?? 0)
 
       const updatedQuery: Query = {
         target: targetServer,
@@ -1390,7 +1395,7 @@ function App() {
       if (aiData.table_name) {
         setCompareTable(aiData.table_name.toUpperCase().trim())
       }
-      if (aiData.rowcount) {
+      if (aiData.rowcount !== undefined && !Number.isNaN(Number(aiData.rowcount))) {
         setCompareRowcount(Number(aiData.rowcount))
       }
       if (Array.isArray(aiData.filters)) {
@@ -1424,7 +1429,7 @@ function App() {
       target: servers[0]?.id || '',
       sources: [blankSource(0)],
       joins: [],
-      rowcount: 100,
+      rowcount: 0,
     })
     setData({ columns: [], rows: [] })
     setBaseData({ columns: [], rows: [] })
@@ -1689,7 +1694,15 @@ function App() {
     setBusy(true); setError(''); setNotice('')
     try {
       const validReportId = reports.some(r => r.id === activeReport) ? activeReport : null
-      const result = await post<GridData>('/sap/query', { ...query, report_id: validReportId })
+      serverProgressRef.current = false
+      const controller = new AbortController()
+      queryAbortRef.current = controller
+      setQueryCancellable(true)
+      const result = await runQueryJob({ ...query, report_id: validReportId }, (progress, text) => {
+        serverProgressRef.current = true
+        setQueryProgress(current => Math.max(current, Math.round(progress)))
+        setQueryProgressText(text)
+      }, controller.signal)
       setQueryProgress(100)
       setQueryProgressText('Data berhasil dimuat!')
       await new Promise(r => setTimeout(r, 200))
@@ -1727,10 +1740,19 @@ function App() {
       }, 100)
       return true
     } catch (e) {
-      setError(message(e))
+      if (isAbortError(e)) setNotice('Query dibatalkan.')
+      else setError(message(e))
       return false
     }
-    finally { setBusy(false) }
+    finally {
+      queryAbortRef.current = null
+      setQueryCancellable(false)
+      setBusy(false)
+    }
+  }
+
+  function cancelQuery() {
+    queryAbortRef.current?.abort()
   }
 
   async function applyPresentation(raw: GridData, calculations: CalculatedColumn[], pivot: PivotConfig | null): Promise<GridData> {
@@ -2035,7 +2057,7 @@ function App() {
     if (!compareTarget || !otherTarget || compareTarget === otherTarget) { setError('Pilih dua server SAP yang berbeda.'); return false }
     if (!compareTable.trim()) { setError('Isi nama tabel yang akan dibandingkan.'); return false }
     if (compareFilters.some(filter => !filter.field.trim())) { setError('Isi field untuk setiap filter.'); return false }
-    if (!Number.isInteger(compareRowcount) || compareRowcount < 1 || compareRowcount > 1000) { setError('Batas baris harus 1–1000.'); return false }
+    if (!Number.isInteger(compareRowcount) || compareRowcount < 0) { setError('Batas baris tidak boleh negatif (0 untuk semua data).'); return false }
     setBusy(true); setError(''); setCompareResult(null); setCompareRows([])
     try {
       const result = await post<NonNullable<typeof compareResult> & { rows: typeof compareRows }>(
@@ -2391,7 +2413,7 @@ function App() {
     setCompareTarget(cfg.target || '')
     setOtherTarget(cfg.other_target || '')
     setCompareTable(cfg.table_name || '')
-    setCompareRowcount(cfg.rowcount || 100)
+    setCompareRowcount(typeof cfg.rowcount === 'number' ? cfg.rowcount : 0)
     setCompareFilters(cfg.filters || [])
     setNotice(`Variant "${variant.name}" dimuat.`)
   }
@@ -2975,13 +2997,28 @@ function App() {
                 {busy ? <span className="spinner" /> : <Play size={16} fill="currentColor" />}
                 {busy ? `${queryProgress}% · Memproses…` : 'Jalankan Query'}
               </button>
+              {queryCancellable && !parameterModalOpen && (
+                <button className="button subtle" onClick={cancelQuery} title="Hentikan query yang sedang berjalan">
+                  <X size={15} /> Batal
+                </button>
+              )}
             </div></div>
           <div className="toolbar"><div className="field-group"><label>SERVER SAP</label>
             <select value={query.target} onChange={e => setQuery({ ...query, target: e.target.value })}>
               <option value="">Pilih server yang diizinkan</option>
               {servers.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></div>
-            <div className="field-group narrow"><label>BATAS BARIS / TABEL</label>
-              <input type="number" min={1} max={1000} value={query.rowcount} onChange={e => setQuery({ ...query, rowcount: Number(e.target.value) })} /></div>
+            <div className="field-group narrow">
+              <label>
+                BATAS BARIS / TABEL {query.rowcount === 0 && <span style={{ color: 'var(--primary)', fontWeight: 600, fontSize: '11px', textTransform: 'none' }}>(Semua)</span>}
+              </label>
+              <input
+                type="number"
+                min={0}
+                placeholder="0 = Semua"
+                title="0 untuk mengambil semua data (dibatasi gateway)"
+                value={query.rowcount}
+                onChange={e => setQuery({ ...query, rowcount: Math.max(0, Number(e.target.value) || 0) })}
+              /></div>
             <div className="toolbar-spacer" /><div className="field-group save-inline">
               <label>
                 {activeReport ? (
@@ -3588,13 +3625,16 @@ function App() {
               </div>
             </div>
             <div className="field-group narrow">
-              <label>BATAS BARIS</label>
+              <label>
+                BATAS BARIS {compareRowcount === 0 && <span style={{ color: 'var(--primary)', fontWeight: 600, fontSize: '11px', textTransform: 'none' }}>(Semua)</span>}
+              </label>
               <input
                 type="number"
-                min={1}
-                max={1000}
+                min={0}
+                placeholder="0 = Semua"
+                title="0 untuk mengambil semua data (dibatasi gateway)"
                 value={compareRowcount}
-                onChange={e => setCompareRowcount(Number(e.target.value))}
+                onChange={e => setCompareRowcount(Math.max(0, Number(e.target.value) || 0))}
               />
             </div>
           </div>
@@ -4738,6 +4778,10 @@ function App() {
                   <div className="progress-banner-stats">
                     <span className="progress-banner-pct">{queryProgress}%</span>
                     <span className="progress-banner-time">({queryElapsedSeconds}s)</span>
+                    {queryCancellable && (
+                      <button type="button" className="button subtle progress-banner-cancel" onClick={cancelQuery}
+                        title="Hentikan query yang sedang berjalan">Batal</button>
+                    )}
                   </div>
                 </div>
                 <div className="progress-bar-track">

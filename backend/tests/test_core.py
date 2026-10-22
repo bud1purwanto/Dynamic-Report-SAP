@@ -1,3 +1,5 @@
+import asyncio
+import dataclasses
 import io
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -494,7 +496,8 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "user_catalog", AsyncMock(return_value=[
             {"id": "conn-dev", "resource_key": "sap:dev"}])), \
              patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
-             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)), \
+             patch.object(main, "settings", dataclasses.replace(main.settings, join_key_batch_size=25)):
             result = await main.execute_query(query, "user-token")
 
         # AUFK (1 call) + AFPO chunk 1 (25 items) + AFPO chunk 2 (15 items) = 3 calls
@@ -506,6 +509,118 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([f for f in read_calls[2].filters if f.field == "AUFNR"]), 15)
         # All 40 joined rows matched!
         self.assertEqual(len(result["rows"]), 40)
+
+    async def test_execute_query_fetches_all_join_keys_concurrently_with_progress(self):
+        # Lebih dari 5000 kunci unik harus diproses semua, bukan dipotong.
+        t1_rows = [{"CUOBJ_BM": f"{i:018d}"} for i in range(1, 6501)]
+        in_flight = 0
+        peak = 0
+
+        async def read_rows(dto, _token):
+            nonlocal in_flight, peak
+            if dto.table_name == "MCH1":
+                return t1_rows
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return [{"OBJEK": f.value, "ATWRT": "X"} for f in dto.filters if f.field == "OBJEK"]
+
+        async def structure(_token, _target, table):
+            if table == "MCH1":
+                return ([{"name": "CUOBJ_BM", "data_type": "NUMC", "is_key": False}], "")
+            return ([{"name": "OBJEK", "data_type": "NUMC", "is_key": True},
+                     {"name": "ATWRT", "data_type": "CHAR", "is_key": False}], "")
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[main.SourceIn(alias="T1", table_name="MCH1", fields=["CUOBJ_BM"]),
+                     main.SourceIn(alias="T2", table_name="AUSP", fields=["ATWRT"])],
+            joins=[main.JoinIn(left_alias="T1", left_field="CUOBJ_BM", right_alias="T2", right_field="OBJEK")],
+        )
+        updates = []
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)), \
+             patch.object(main, "settings", dataclasses.replace(
+                 main.settings, join_key_batch_size=100, join_fetch_concurrency=3)):
+            result = await main.execute_query(query, "user-token", lambda pct, text: updates.append(pct))
+
+        self.assertEqual(len(result["rows"]), 6500)
+        self.assertFalse(any("melebihi" in w for w in result["warnings"]))
+        self.assertGreater(peak, 1)
+        self.assertLessEqual(peak, 3)
+        self.assertEqual(updates, sorted(updates))
+        self.assertLess(max(updates), 100)
+
+    async def test_execute_query_surfaces_batch_http_error(self):
+        async def read_rows(dto, _token):
+            if dto.table_name == "AUFK":
+                return [{"AUFNR": f"ORD_{i:03d}"} for i in range(40)]
+            raise HTTPException(504, "SAP timeout")
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR"]),
+                     main.SourceIn(alias="T2", table_name="AFPO", fields=["MATNR"])],
+            joins=[main.JoinIn(left_alias="T1", left_field="AUFNR", right_alias="T2", right_field="AUFNR")],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[
+            {"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(return_value=([], ""))), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)), \
+             patch.object(main, "settings", dataclasses.replace(main.settings, join_key_batch_size=10)):
+            with self.assertRaises(HTTPException) as ctx:
+                await main.execute_query(query, "user-token")
+        self.assertEqual(ctx.exception.status_code, 504)
+
+    async def test_query_job_runs_in_background_and_returns_result_once(self):
+        session = SimpleNamespace(user_id="u1", user_profile={})
+        other = SimpleNamespace(user_id="u2", user_profile={})
+        request = SimpleNamespace(cookies={main.settings.cookie_name: "cookie"})
+        query = main.QueryIn(target="conn-dev", sources=[main.SourceIn(alias="T1", table_name="MARA", fields=["MATNR"])])
+        result = {"columns": ["T1.MATNR"], "rows": [{"T1.MATNR": "M1"}], "warnings": []}
+
+        async def fake_execute(_dto, token, progress=None):
+            self.assertTrue(callable(token))
+            progress(50, "Membaca MARA")
+            return result
+
+        with patch.object(main, "execute_query", AsyncMock(side_effect=fake_execute)), \
+             patch.object(main, "record_query_run", MagicMock()) as recorder, \
+             patch.object(main, "SessionLocal", MagicMock()):
+            started = await main.start_query_job(query, request, (session, "tok"), MagicMock())
+            job_id = started["job_id"]
+            await main.QUERY_JOBS[job_id]["task"]
+            with self.assertRaises(HTTPException):
+                await main.query_job_status(job_id, (other, "tok"))
+            status = await main.query_job_status(job_id, (session, "tok"))
+            self.assertEqual(status["status"], "success")
+            self.assertEqual(status["result"], result)
+            self.assertEqual(recorder.call_args.args[4], "success")
+            with self.assertRaises(HTTPException):
+                await main.query_job_status(job_id, (session, "tok"))
+
+    async def test_cancel_query_job_stops_running_task(self):
+        session = SimpleNamespace(user_id="u1", user_profile={})
+        request = SimpleNamespace(cookies={main.settings.cookie_name: "cookie"})
+        query = main.QueryIn(target="conn-dev", sources=[main.SourceIn(alias="T1", table_name="MARA", fields=["MATNR"])])
+        started_event = asyncio.Event()
+
+        async def slow_execute(_dto, _token, progress=None):
+            started_event.set()
+            await asyncio.sleep(60)
+
+        with patch.object(main, "execute_query", AsyncMock(side_effect=slow_execute)), \
+             patch.object(main, "record_query_run", MagicMock()):
+            job_id = (await main.start_query_job(query, request, (session, "tok"), MagicMock()))["job_id"]
+            task = main.QUERY_JOBS[job_id]["task"]
+            await started_event.wait()
+            self.assertEqual(await main.cancel_query_job(job_id, (session, "tok")), {"cancelled": True})
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertNotIn(job_id, main.QUERY_JOBS)
 
     async def test_execute_query_allows_combined_source_and_chunk_filters_exceeding_30(self):
         t1_rows = [{"AUFNR": f"{1000000 + i}", "WERKS": "1000"} for i in range(25)]
@@ -543,6 +658,57 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
             result = await main.execute_query(query, "user-token")
         self.assertEqual(len(result["rows"]), 25)
+
+    async def test_execute_query_prunes_unmatched_downstream_rows(self):
+        async def structure(_token, _target, table):
+            return [{"name": "AUFNR", "data_type": "CHAR", "is_key": True},
+                    {"name": "CHARG", "data_type": "CHAR", "is_key": True},
+                    {"name": "CUOBJ", "data_type": "CHAR", "is_key": False},
+                    {"name": "VAL", "data_type": "CHAR", "is_key": False}], ""
+
+        # T1 has 2 rows
+        t1_rows = [{"AUFNR": "ORD_1"}, {"AUFNR": "ORD_2"}]
+        # T2 has 4 rows, only 2 match T1
+        t2_rows = [
+            {"AUFNR": "ORD_1", "CHARG": "BAT_1", "CUOBJ": "OBJ_1"},
+            {"AUFNR": "ORD_2", "CHARG": "BAT_2", "CUOBJ": "OBJ_2"},
+            {"AUFNR": "ORD_99", "CHARG": "BAT_99", "CUOBJ": "OBJ_99"},
+            {"AUFNR": "ORD_100", "CHARG": "BAT_100", "CUOBJ": "OBJ_100"},
+        ]
+        t3_calls = []
+
+        async def read_rows(dto, _token):
+            if dto.table_name == "AUFK":
+                return t1_rows
+            elif dto.table_name == "MCH1":
+                return t2_rows
+            elif dto.table_name == "AUSP":
+                t3_calls.append(dto)
+                # T3 (AUSP) should only receive filters for the 2 matching CUOBJs (OBJ_1 and OBJ_2)
+                return [{"CUOBJ": "OBJ_1", "VAL": "V1"}, {"CUOBJ": "OBJ_2", "VAL": "V2"}]
+            return []
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="AUFK", fields=["AUFNR"]),
+                main.SourceIn(alias="T2", table_name="MCH1", fields=["AUFNR", "CHARG", "CUOBJ"]),
+                main.SourceIn(alias="T3", table_name="AUSP", fields=["CUOBJ", "VAL"]),
+            ],
+            joins=[
+                main.JoinIn(left_alias="T1", left_field="AUFNR", right_alias="T2", right_field="AUFNR", how="inner"),
+                main.JoinIn(left_alias="T2", left_field="CUOBJ", right_alias="T3", right_field="CUOBJ", how="left"),
+            ],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[{"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.execute_query(query, "user-token")
+
+        self.assertEqual(len(result["rows"]), 2)
+        # Verify T3 only received CUOBJ filters for OBJ_1 and OBJ_2 (not OBJ_99 or OBJ_100)
+        t3_cuobjs = [f.value for f in t3_calls[0].filters if f.field == "CUOBJ"]
+        self.assertEqual(sorted(t3_cuobjs), ["OBJ_1", "OBJ_2"])
 
     async def test_rename_report(self):
         mock_db = MagicMock()

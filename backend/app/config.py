@@ -41,6 +41,8 @@ class Settings:
     openrouter_model: str
     openrouter_fallback_model: str
     sap_rpc_timeout: int
+    join_key_batch_size: int = 100
+    join_fetch_concurrency: int = 4
 
 
 def get_settings() -> Settings:
@@ -79,6 +81,8 @@ def get_settings() -> Settings:
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openrouter/auto").strip(),
         openrouter_fallback_model=os.getenv("OPENROUTER_FALLBACK_MODEL", "openrouter/free").strip(),
         sap_rpc_timeout=int(os.getenv("SAP_RPC_TIMEOUT", "120")),
+        join_key_batch_size=max(1, min(500, int(os.getenv("JOIN_KEY_BATCH_SIZE", "100")))),
+        join_fetch_concurrency=max(1, min(16, int(os.getenv("JOIN_FETCH_CONCURRENCY", "4")))),
     )
 
 
