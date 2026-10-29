@@ -98,6 +98,21 @@ class ReportShare(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class SapTransportSettings(Base):
+    __tablename__ = "sap_transport_settings"
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    config: Mapped[dict] = mapped_column(JSON)
+
+
+class SapTransportAudit(Base):
+    __tablename__ = "sap_transport_audit"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    actor: Mapped[str] = mapped_column(String(255))
+    before: Mapped[dict] = mapped_column(JSON)
+    after: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 

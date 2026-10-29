@@ -17,6 +17,9 @@ from backend.app import main
 class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main.STRUCTURE_CACHE.clear()
+        policy = patch.object(main, "transport_config", return_value=main.TransportIn().model_dump())
+        policy.start()
+        self.addCleanup(policy.stop)
 
     async def test_pivot_keeps_material_batch_pairs_and_averages_numeric_values(self):
         rows = [

@@ -435,7 +435,46 @@ def match_target(rows: list[dict[str, Any]], target: str) -> dict[str, Any]:
     raise HTTPException(422, f"Target SAP {target} tidak ada dalam katalog.")
 
 
+class TransportIn(BaseModel):
+    model_config = {"extra": "forbid", "strict": True}
+    enable_pyrfc: bool = False
+    enable_oidc_gateway: bool = True
+    transport_priority: Literal["gateway", "pyrfc"] = "gateway"
+    enable_transport_fallback: bool = False
+
+
+def transport_config() -> dict:
+    from .db import SapTransportSettings
+    with SessionLocal() as db:
+        row = db.get(SapTransportSettings, "global")
+        return TransportIn.model_validate(row.config if row else {}).model_dump()
+
+
+def transport_route(config: dict) -> str:
+    if not config["enable_pyrfc"] and not config["enable_oidc_gateway"]:
+        raise HTTPException(503, "Semua jalur SAP dinonaktifkan oleh admin.")
+    preferred = config["transport_priority"]
+    if config["enable_pyrfc"] and (preferred == "pyrfc" or not config["enable_oidc_gateway"]):
+        return "pyrfc"
+    return "gateway"
+
+
 async def rpc_call(token: str, target: str, name: str, arguments: dict, timeout: int | None = None) -> Any:
+    config = await asyncio.to_thread(transport_config)
+    route = transport_route(config)
+    if route == "gateway":
+        # User Gateway MUST never inherit the technical identity of direct RFC.
+        return await gateway_rpc_call(token, target, name, arguments, timeout)
+    from .sap_direct import direct_call, DirectUnavailable
+    try:
+        return await asyncio.to_thread(direct_call, target, name, arguments)
+    except DirectUnavailable:
+        if config["enable_oidc_gateway"] and config["enable_transport_fallback"]:
+            return await gateway_rpc_call(token, target, name, arguments, timeout)
+        raise HTTPException(503, "Direct pyRFC belum tersedia; periksa SDK dan pemetaan target backend.") from None
+
+
+async def gateway_rpc_call(token: str, target: str, name: str, arguments: dict, timeout: int | None = None) -> Any:
     rpc_timeout = timeout or settings.sap_rpc_timeout
     payload = {"jsonrpc": "2.0", "id": secrets.token_hex(8), "method": "tools/call",
                "params": {"name": name, "arguments": arguments}}
@@ -451,7 +490,10 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict, timeout:
                     "Accept": "application/json",
                 },
             )
-        fail_upstream(res, f"MCP Gateway [{target}]")
+        if res.status_code in (401, 403):
+            raise HTTPException(403, "Akses SAP melalui Gateway ditolak.")
+        if res.status_code >= 400:
+            raise HTTPException(502, "Layanan Gateway SAP gagal; periksa status layanan backend.")
         data = res.json()
     except HTTPException:
         raise
@@ -463,16 +505,12 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict, timeout:
             "Saran: persempit rentang filter tanggal atau tambahkan filter spesifik (seperti Plant / WERKS, Jenis Order / AUART)."
         ) from None
     except (httpx.HTTPError, ValueError) as err:
-        err_detail = str(err) or type(err).__name__
-        raise HTTPException(502, f"MCP Gateway untuk {target} tidak dapat dihubungi: {err_detail}") from None
+        raise HTTPException(502, "MCP Gateway SAP tidak dapat dihubungi atau respons tidak valid.") from None
     if data.get("error"):
-        err_msg = str(data["error"].get("message") or data["error"])
-        raise HTTPException(502, friendly_sap_error(err_msg, target))
+        raise HTTPException(502, "Gateway menolak operasi SAP atau eksekusi SAP gagal.")
     result = data.get("result", {})
     if result.get("isError"):
-        messages = [str(c.get("text", "")) for c in result.get("content", [])]
-        raw_msg = " ".join(messages) if messages else "Eksekusi tool pada MCP Gateway menghasilkan isError=true"
-        raise HTTPException(502, friendly_sap_error(raw_msg, target))
+        raise HTTPException(502, "Eksekusi tool SAP Gateway gagal atau izin ditolak.")
     return result
 
 
@@ -481,6 +519,8 @@ TOOL_CONTRACT_CACHE: tuple[float, tuple[str, dict[str, Any]]] | None = None
 
 async def read_tool_contract(token: str) -> tuple[str, dict[str, Any]]:
     global TOOL_CONTRACT_CACHE
+    if transport_route(await asyncio.to_thread(transport_config)) == "pyrfc":
+        return "mcp-sap__read_table", {"properties": {"table_name": {"type": "string"}, "fields": {"type": "array"}, "rowcount": {"type": "integer"}}}
     if TOOL_CONTRACT_CACHE and TOOL_CONTRACT_CACHE[0] > time.monotonic():
         return TOOL_CONTRACT_CACHE[1]
     try:
@@ -619,8 +659,9 @@ def parse_structure(result: Any) -> tuple[list[dict[str, Any]], str]:
 async def get_structure(token: str, target: dict[str, Any], table_name: str) -> tuple[list[dict[str, Any]], str]:
     if not IDENT.fullmatch(table_name):
         raise HTTPException(422, "Nama tabel tidak valid.")
+    route = transport_route(await asyncio.to_thread(transport_config))
     table_upper = table_name.upper()
-    cache_key = (str(target.get("resource_key") or target.get("id")), table_upper)
+    cache_key = (hashlib.sha256(token.encode()).hexdigest() + ":" + route + ":" + str(target.get("resource_key") or target.get("id")), table_upper)
     cached = STRUCTURE_CACHE.get(cache_key)
     if cached and cached[0] > time.monotonic():
         # Return deep copy of fields list to avoid mutations
@@ -852,6 +893,81 @@ async def read_rows(dto: ReadIn, token: str) -> list[dict[str, Any]]:
         arguments["batch_size"] = min(dto.rowcount, 1000)
     result = await rpc_call(token, dto.target, name, arguments)
     return unpack_rows(result)
+
+
+async def require_transport_admin(auth: tuple[AppSession, str] = Depends(get_token)):
+    # Fresh server-side OIDC check; never trust browser fields or cached local roles.
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(f"{settings.oidc_issuer}/v1/auth/me", headers={"Authorization": f"Bearer {auth[1]}"})
+        if res.status_code != 200:
+            raise HTTPException(403, "Verifikasi admin OIDC ditolak.")
+        payload = res.json()
+        user = payload.get("user", payload)
+        roles = user.get("roles", [])
+        if isinstance(roles, str):
+            roles = [roles]
+        roles = {str(role).upper() for role in roles} | {str(user.get("role", "")).upper()}
+        if str(user.get("id") or user.get("sub")) != auth[0].user_id or not roles.intersection({"ADMIN", "SUPERADMIN"}):
+            raise HTTPException(403, "Hanya admin OIDC dapat mengatur jembatan SAP.")
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        raise HTTPException(503, "Verifikasi admin OIDC tidak tersedia.") from None
+    return auth
+
+
+@app.get("/api/admin/sap-transport")
+async def get_transport_settings(auth=Depends(require_transport_admin)):
+    config = await asyncio.to_thread(transport_config)
+    return {"config": config, "status": "disabled" if not any((config["enable_pyrfc"], config["enable_oidc_gateway"])) else "configured",
+            "identity_notice": "Gateway memakai identitas SAP pribadi. Direct pyRFC memakai akun teknis per target; tidak ada fallback Gateway ke pyRFC."}
+
+
+@app.put("/api/admin/sap-transport")
+def update_transport_settings(dto: TransportIn, auth=Depends(require_transport_admin), db: Session = Depends(get_db)):
+    from .db import SapTransportSettings, SapTransportAudit
+    # Serialize writers, including initial row creation, without changing existing data.
+    if db.bind.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(71641029)"))
+    row = db.get(SapTransportSettings, "global")
+    before = TransportIn.model_validate(row.config if row else {}).model_dump()
+    after = dto.model_dump()
+    if before != after:
+        if row is None:
+            row = SapTransportSettings(id="global", config=after)
+            db.add(row)
+        else:
+            row.config = after
+        db.add(SapTransportAudit(actor=auth[0].user_id, before=before, after=after))
+        db.commit()
+        STRUCTURE_CACHE.clear()
+    return {"config": after}
+
+
+class TransportTestIn(BaseModel):
+    route: Literal["gateway", "pyrfc"]
+    target: str = Field(min_length=1)
+
+
+@app.post("/api/admin/sap-transport/test")
+async def test_transport_connection(dto: TransportTestIn, auth=Depends(require_transport_admin)):
+    config = await asyncio.to_thread(transport_config)
+    if not config["enable_oidc_gateway" if dto.route == "gateway" else "enable_pyrfc"]:
+        raise HTTPException(409, "Jalur ini dinonaktifkan; simpan pengaturan sebelum menguji.")
+    target = match_target(await user_catalog(auth[1]), dto.target)
+    arguments = {"resource_key": target["resource_key"], "function_name": "RFC_SYSTEM_INFO", "parameters": {}}
+    started = time.monotonic()
+    try:
+        if dto.route == "gateway":
+            await gateway_rpc_call(auth[1], str(target["id"]), "mcp-sap__call_function", arguments)
+        else:
+            from .sap_direct import direct_call, DirectUnavailable
+            try:
+                await asyncio.to_thread(direct_call, str(target["id"]), "mcp-sap__call_function", arguments)
+            except DirectUnavailable:
+                raise HTTPException(503, "SDK pyRFC atau pemetaan target belum tersedia.") from None
+    except HTTPException as exc:
+        return {"route": dto.route, "target": dto.target, "ok": False, "message": "Uji jalur SAP gagal; periksa konfigurasi dan izin.", "status_code": exc.status_code}
+    return {"route": dto.route, "target": dto.target, "ok": True, "elapsed_ms": round((time.monotonic() - started) * 1000)}
 
 
 @app.get("/api/health")

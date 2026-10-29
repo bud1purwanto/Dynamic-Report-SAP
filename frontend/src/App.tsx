@@ -9,6 +9,7 @@ import {
   Play, Plus, RotateCcw, RotateCw, Save, Scan, Search, Settings2, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, UserCheck, UserPlus, Users, X,
 } from 'lucide-react'
 import { api, isAbortError, post, runQueryJob } from './api'
+import { SapTransportPanel } from './SapTransportPanel'
 import type { GridData, Join, JoinCondition, Query, Row, Server, Source } from './api'
 
 type User = { id?: string; username?: string; email?: string; roles?: string[]; mustChangePassword?: boolean }
@@ -2786,6 +2787,7 @@ function App() {
         <button className={tab === 'builder' ? 'active' : ''} onClick={() => setTab('builder')}><Columns3 size={18} /> Query Builder</button>
         <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}><GitCompareArrows size={18} /> Bandingkan Data</button>
         <button className={tab === 'schedules' ? 'active' : ''} onClick={openSchedules}><BarChart3 size={18} /> Jadwal & Riwayat</button>
+        <SapTransportPanel />
       </nav>
       <div className="sidebar-label saved-label">LAPORAN TERSIMPAN <span>{reports.length}</span></div>
       <div className="report-list">{reports.map(r => (
@@ -3193,7 +3195,7 @@ function App() {
                 </ReactFlow>
               </div>
               <div className="canvas-foot">
-                <span className="connection-dot" /> Semua operasi SAP melalui MCP Gateway
+                <span className="connection-dot" /> Operasi SAP mengikuti kebijakan jembatan admin
               </div>
             </section>
           </div>
