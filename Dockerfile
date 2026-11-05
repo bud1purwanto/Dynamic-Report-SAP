@@ -10,7 +10,15 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-# Stage 2: Runtime Backend & App
+# Stage 2: Build pyrfc (SAP NW RFC SDK diberikan lewat build context "nwrfcsdk", lihat docker-compose.yml)
+FROM python:3.12-slim AS pyrfc-builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+COPY --from=nwrfcsdk / /usr/local/sap/nwrfcsdk
+ENV SAPNWRFC_HOME=/usr/local/sap/nwrfcsdk
+# pyrfc 3.3.1 ditandai "yanked" di PyPI sehingga wajib dipin eksplisit (sama seperti ABAP-Git).
+RUN pip wheel --no-cache-dir --wheel-dir /wheels "pyrfc==3.3.1"
+
+# Stage 3: Runtime Backend & App
 FROM python:3.12-slim AS runner
 
 WORKDIR /app
@@ -24,6 +32,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r ./backend/requirements.txt
+
+# Direct pyRFC: library SDK di-mount saat runtime (docker-compose.yml), modul pyrfc dari stage builder.
+ENV SAPNWRFC_HOME=/usr/local/sap/nwrfcsdk
+ENV LD_LIBRARY_PATH=/usr/local/sap/nwrfcsdk/lib
+COPY --from=pyrfc-builder /wheels /tmp/wheels
+RUN pip install --no-cache-dir /tmp/wheels/*.whl && rm -rf /tmp/wheels
 
 # Copy backend application source
 COPY backend/ ./backend/

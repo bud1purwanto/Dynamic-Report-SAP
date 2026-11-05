@@ -496,7 +496,8 @@ function App() {
 
   const pushToast = (toast: Omit<Toast, 'id'>) => {
     const id = Math.random().toString(36).substring(2, 9)
-    setToasts(current => [...current, { ...toast, id }])
+    // Pesan identik yang masih tampil diganti (bukan ditumpuk) agar error berulang tidak membanjiri layar.
+    setToasts(current => [...current.filter(t => !(t.type === toast.type && t.message === toast.message)), { ...toast, id }])
     window.setTimeout(() => {
       setToasts(current => current.filter(t => t.id !== id))
     }, toast.type === 'error' ? 5000 : 3500)

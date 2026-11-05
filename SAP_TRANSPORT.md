@@ -15,17 +15,21 @@ Startup `init_db()` membuat tabel baru `sap_transport_settings` dan `sap_transpo
 
 ## Sumber kredensial direct yang sah
 
-Acuan ABAP Git `sap_transport.py` membangun koneksi dari atribut Sandbox (`host`, `sysnr`, `client`, `rfc_user`, `rfc_password`). Router `sandboxes.py::sync_sandboxes_from_oidc` hanya menyinkronkan metadata katalog; server baru justru dibuat dengan user/password kosong. Tidak ditemukan kontrak katalog yang memberikan password SAP pribadi ke backend Lumina. Karena itu tidak dibuat endpoint kredensial rekaan dan tidak membaca database ABAP Git.
+Sama dengan ABAP Git: Direct pyRFC **tidak punya pengaturan server sendiri**. Kredensial dibaca langsung dari tabel `sandboxes` ABAP Git (`host`, `sysnr`, `client`, `rfc_user`, `rfc_password`) di database yang sama, schema `abap_git_dev` lalu `abap_git` (ubah lewat env `ABAPGIT_DATABASE_SCHEMA`). Server dicocokkan lewat `connection_id` / pemetaan nama ABAP Git ke resource key katalog (mis. `sap:dev`).
 
-Operator yang memang berwenang menyediakan **backend environment** `LUMINA_PYRFC_TARGETS_JSON`, JSON object dengan key **resource_key persis** dari katalog. Contoh placeholder (bukan kredensial aktif):
+- Jembatan hanya untuk **membaca data**: RFC_READ_TABLE, DDIF_FIELDINFO_GET, RFC_SYSTEM_INFO. Tidak ada operasi tulis.
+- Server ABAP Git dengan host `gateway` atau tanpa user/password RFC dianggap "Hanya Gateway".
+- Password tidak pernah dikirim ke browser; `GET /api/admin/sap-rfc-targets` hanya menampilkan host/client/user.
+- `LUMINA_PYRFC_TARGETS_JSON` tetap dibaca sebagai cadangan bila server tidak ada di ABAP Git.
 
-```json
-{"sap:dev":{"ashost":"sap-host.example.invalid","sysnr":"00","client":"100","user":"READ_ONLY_SERVICE","passwd":"<diisi operator di secret store>","lang":"EN"}}
-```
+## Pemasangan SDK dan pyrfc
 
-Optional `saprouter` didukung. Tidak ada pemilihan host default, pencarian fuzzy, atau donor password target lain. Jangan taruh nilai asli dalam Git, frontend, laporan uji, command history, atau log. Gunakan secret store/environment yang dibatasi izin, dan akun read-only berhak minimum. Backend API tidak menerima/mengembalikan pemetaan ini. Memperbarui environment membutuhkan restart proses development yang bersangkutan.
+SAP NW RFC SDK berada di host `/usr/local/sap/nwrfcsdk` (sama dengan ABAP Git). pyrfc 3.3.1 ditandai *yanked* di PyPI, jadi harus dipin:
 
-pyRFC dan SAP NetWeaver RFC SDK dipasang terpisah oleh operator sesuai lisensi/platform. Import pyRFC bersifat lazy; ImportError/OSError tidak merusak mode Gateway. Tidak ditambahkan sebagai dependensi wajib.
+- Lokal (`start.sh`): `SAPNWRFC_HOME=/usr/local/sap/nwrfcsdk .venv/bin/pip install "pyrfc==3.3.1"`
+- Docker: `docker compose build` membangun wheel pyrfc dari build context `nwrfcsdk` (`SAPNWRFC_HOST_PATH`, default `/usr/local/sap/nwrfcsdk`) dan mount SDK read-only saat runtime.
+
+Status SDK tampil di modal Jembatan SAP. Import pyRFC bersifat lazy; bila belum terpasang, mode Gateway tetap berjalan.
 
 ## Kontrak dan batas direct
 
@@ -37,4 +41,4 @@ Gunakan `.venv/bin/python -m unittest discover -s backend/tests -v`, `npm --pref
 
 Harness sementara `/home/abap/.hermes/cache/scratch/lumina_dev_harness.py` dapat dijalankan dari root proyek dengan `.venv/bin/python /home/abap/.hermes/cache/scratch/lumina_dev_harness.py`. UI di `http://127.0.0.1:58391` memakai SQLite scratch serta **identitas OIDC dan hasil SAP sintetis**, bukan login atau SAP nyata. Harness sengaja dependency-override autentikasi untuk uji UI, bind loopback saja, dan bukan server untuk produksi. Hentikan setelah tinjauan. PostgreSQL disposable terpisah pada port 55439 dipakai menguji migrasi idempoten/preservasi laporan/audit, bukan database enterprise.
 
-Uji SAP nyata belum dilakukan: belum ada konfigurasi kredensial per target dan SDK yang divalidasi. Status probe sintetis bukan bukti koneksi SAP enterprise.
+Gunakan tombol **Uji pyRFC** per server (RFC_SYSTEM_INFO) untuk membuktikan koneksi SAP nyata.

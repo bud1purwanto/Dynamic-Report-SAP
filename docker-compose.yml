@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        nwrfcsdk: ${SAPNWRFC_HOST_PATH:-/usr/local/sap/nwrfcsdk}
     container_name: lumina-dynamic-report
     restart: unless-stopped
     ports:
@@ -42,6 +44,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/auto}
       OPENROUTER_FALLBACK_MODEL: ${OPENROUTER_FALLBACK_MODEL:-openrouter/free}
+    volumes:
+      # SAP NetWeaver RFC SDK dari host (sama seperti ABAP-Git) untuk Direct pyRFC.
+      - ${SAPNWRFC_HOST_PATH:-/usr/local/sap/nwrfcsdk}:/usr/local/sap/nwrfcsdk:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

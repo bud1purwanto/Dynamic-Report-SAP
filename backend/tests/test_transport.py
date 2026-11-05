@@ -124,3 +124,45 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as caught:
                 await main.require_transport_admin(auth)
             self.assertEqual(caught.exception.status_code, 403)
+
+
+
+class AbapGitCredentialTests(unittest.TestCase):
+    SERVERS = [
+        {'resource_key': 'sap:dev', 'name': 'Development AIX', 'ashost': '10.0.0.8', 'sysnr': '00', 'client': '130', 'rfc_user': 'TECH', 'passwd': 'S3cret!', 'usable': True},
+        {'resource_key': 'sap:dev-win', 'name': 'Development Windows', 'ashost': 'gateway', 'sysnr': '00', 'client': '130', 'rfc_user': '', 'passwd': '', 'usable': False},
+    ]
+
+    def test_direct_call_uses_abapgit_sandbox_credentials(self):
+        import sys, types
+        from unittest.mock import MagicMock
+        from backend.app import sap_direct
+        Connection = MagicMock(return_value=MagicMock(call=MagicMock(return_value={})))
+        with patch.object(sap_direct, 'abapgit_servers', return_value=self.SERVERS), patch.dict(sys.modules, {'pyrfc': types.SimpleNamespace(Connection=Connection)}):
+            sap_direct.direct_call('dev', 'mcp-sap__call_function', {'resource_key': 'sap:dev', 'function_name': 'RFC_SYSTEM_INFO'})
+        kw = Connection.call_args.kwargs
+        self.assertEqual((kw['ashost'], kw['client'], kw['user'], kw['passwd']), ('10.0.0.8', '130', 'TECH', 'S3cret!'))
+
+    def test_gateway_only_and_unknown_servers_have_clear_reasons(self):
+        from backend.app import sap_direct
+        with patch.object(sap_direct, 'abapgit_servers', return_value=self.SERVERS), patch.dict('os.environ', {'LUMINA_PYRFC_TARGETS_JSON': ''}):
+            with self.assertRaises(sap_direct.DirectUnavailable) as gw:
+                sap_direct.target_credentials('sap:dev-win')
+            with self.assertRaises(sap_direct.DirectUnavailable) as unknown:
+                sap_direct.target_credentials('sap:xyz')
+        self.assertIn('Gateway', gw.exception.reason)
+        self.assertIn('sap:xyz', unknown.exception.reason)
+
+    def test_resource_key_mapping_matches_abapgit(self):
+        from types import SimpleNamespace
+        from backend.app.sap_direct import _abapgit_key
+        row = lambda **k: SimpleNamespace(**{'name': '', 'connection_id': None, 'oidc_target': None, **k})
+        self.assertEqual(_abapgit_key(row(name='Development AIX')), 'sap:dev')
+        self.assertEqual(_abapgit_key(row(name='X', connection_id='sap:qa')), 'sap:qa')
+
+    def test_rfc_errors_are_mapped_without_leaking_details(self):
+        from backend.app.sap_direct import rfc_error_message
+        LogonError = type('LogonError', (Exception,), {})
+        message = rfc_error_message(LogonError('passwd=DO_NOT_EXPOSE'))
+        self.assertIn('Logon SAP ditolak', message)
+        self.assertNotIn('DO_NOT_EXPOSE', message)

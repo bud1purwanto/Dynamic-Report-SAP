@@ -468,10 +468,10 @@ async def rpc_call(token: str, target: str, name: str, arguments: dict, timeout:
     from .sap_direct import direct_call, DirectUnavailable
     try:
         return await asyncio.to_thread(direct_call, target, name, arguments)
-    except DirectUnavailable:
+    except DirectUnavailable as exc:
         if config["enable_oidc_gateway"] and config["enable_transport_fallback"]:
             return await gateway_rpc_call(token, target, name, arguments, timeout)
-        raise HTTPException(503, "Direct pyRFC belum tersedia; periksa SDK dan pemetaan target backend.") from None
+        raise HTTPException(503, exc.reason) from None
 
 
 async def gateway_rpc_call(token: str, target: str, name: str, arguments: dict, timeout: int | None = None) -> Any:
@@ -917,8 +917,9 @@ async def require_transport_admin(auth: tuple[AppSession, str] = Depends(get_tok
 
 @app.get("/api/admin/sap-transport")
 async def get_transport_settings(auth=Depends(require_transport_admin)):
+    from .sap_direct import sdk_status
     config = await asyncio.to_thread(transport_config)
-    return {"config": config, "status": "disabled" if not any((config["enable_pyrfc"], config["enable_oidc_gateway"])) else "configured",
+    return {"config": config, "pyrfc": await asyncio.to_thread(sdk_status), "status": "disabled" if not any((config["enable_pyrfc"], config["enable_oidc_gateway"])) else "configured",
             "identity_notice": "Gateway memakai identitas SAP pribadi. Direct pyRFC memakai akun teknis per target; tidak ada fallback Gateway ke pyRFC."}
 
 
@@ -963,11 +964,19 @@ async def test_transport_connection(dto: TransportTestIn, auth=Depends(require_t
             from .sap_direct import direct_call, DirectUnavailable
             try:
                 await asyncio.to_thread(direct_call, str(target["id"]), "mcp-sap__call_function", arguments)
-            except DirectUnavailable:
-                raise HTTPException(503, "SDK pyRFC atau pemetaan target belum tersedia.") from None
+            except DirectUnavailable as exc:
+                raise HTTPException(503, exc.reason) from None
     except HTTPException as exc:
-        return {"route": dto.route, "target": dto.target, "ok": False, "message": "Uji jalur SAP gagal; periksa konfigurasi dan izin.", "status_code": exc.status_code}
+        message = exc.detail if dto.route == "pyrfc" and isinstance(exc.detail, str) else "Uji jalur SAP gagal; periksa konfigurasi dan izin."
+        return {"route": dto.route, "target": dto.target, "ok": False, "message": message, "status_code": exc.status_code}
     return {"route": dto.route, "target": dto.target, "ok": True, "elapsed_ms": round((time.monotonic() - started) * 1000)}
+
+
+@app.get("/api/admin/sap-rfc-targets")
+async def list_rfc_targets(auth=Depends(require_transport_admin)):
+    """Server pyRFC dibaca dari ABAP-Git (tanpa password); tidak ada pengaturan server di Lumina."""
+    from .sap_direct import abapgit_servers
+    return {"targets": await asyncio.to_thread(abapgit_servers)}
 
 
 @app.get("/api/health")
