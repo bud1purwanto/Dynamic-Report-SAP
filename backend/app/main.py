@@ -415,6 +415,10 @@ async def user_catalog(token: str) -> list[dict[str, Any]]:
             "id": connection["id"],
             "connection_id": connection["id"],
         })
+    cfg = await asyncio.to_thread(transport_config)
+    if cfg["enable_pyrfc"] and (cfg["transport_priority"] == "pyrfc" or not cfg["enable_oidc_gateway"]):
+        # Direct pyRFC hanya dipakai untuk membaca data SAP; otorisasi daftar server tetap dari OIDC connections.
+        return output
     access = await asyncio.gather(*(
         gateway_allows_resource(token, str(resource["resource_key"])) for resource in output
     ))
@@ -1291,6 +1295,7 @@ async def execute_query(dto: QueryIn, token: TokenSource,
         source_filters = [f for f in source.filters if f.value.strip()]
 
         chunk_col = None
+        chunk_vals: list[str] = []
         chunk_batches: list[list[str]] = []
         skip_fetch = False
         if source_idx > 0:
@@ -1321,18 +1326,23 @@ async def execute_query(dto: QueryIn, token: TokenSource,
                                         FilterIn(field=right_col, operator="EQ", value=value)
                                         for value in distinct_vals
                                     )
-                                elif len(distinct_vals) > 30 - len(source_filters) and not chunk_batches:
-                                    chunk_col = right_col
-                                    # Semua kunci diproses; batch disesuaikan agar total filter
-                                    # per panggilan tetap dalam batas ReadIn.
-                                    batch_size = max(1, min(settings.join_key_batch_size,
-                                                            1000 - len(source_filters)))
-                                    chunk_batches = [distinct_vals[i:i + batch_size]
-                                                     for i in range(0, len(distinct_vals), batch_size)]
+                                elif len(distinct_vals) > 30 - len(source_filters):
+                                    # Untuk join multi-kondisi (mis. MATNR + AUFNR->LICHA), pilih kunci
+                                    # dengan kardinalitas tertinggi karena paling selektif di SAP.
+                                    if len(distinct_vals) > len(chunk_vals):
+                                        chunk_col = right_col
+                                        chunk_vals = distinct_vals
                                 elif len(distinct_vals) == 0 and len(left_df) > 0:
                                     warnings.append(
                                         f"Field {cond.left_field} pada tabel {join.left_alias} kosong atau 0 untuk data terpilih."
                                     )
+        if chunk_vals and chunk_col:
+            # Semua kunci diproses; batch disesuaikan agar total filter
+            # per panggilan tetap dalam batas ReadIn.
+            batch_size = max(1, min(settings.join_key_batch_size,
+                                    1000 - len(source_filters)))
+            chunk_batches = [chunk_vals[i:i + batch_size]
+                             for i in range(0, len(chunk_vals), batch_size)]
 
         downstream_limit = dto.rowcount if dto.rowcount > 0 else 0
         if skip_fetch:
@@ -1405,14 +1415,20 @@ async def execute_query(dto: QueryIn, token: TokenSource,
         right_keys = [f"{join.right_alias}.{item.right_field.upper()}" for item in conditions]
         if any(key not in merged for key in left_keys) or any(key not in frames[source.alias] for key in right_keys):
             raise HTTPException(422, "Field join tidak ada dalam fields tabel.")
-        for condition, left_key, right_key in zip(conditions, left_keys, right_keys):
-            left_meta = metadata.get(join.left_alias, {}).get(condition.left_field.upper())
-            right_meta = metadata.get(join.right_alias, {}).get(condition.right_field.upper())
-            if left_meta and right_meta and left_meta.get("data_type") and right_meta.get("data_type"):
-                if left_meta["data_type"].upper() != right_meta["data_type"].upper():
-                    raise HTTPException(422, f"Tipe field join {left_key} dan {right_key} berbeda.")
-        merged = merged.merge(frames[source.alias], left_on=left_keys, right_on=right_keys,
+        temp_left_keys = []
+        temp_right_keys = []
+        right_df = frames[source.alias]
+        for key_idx, (left_key, right_key) in enumerate(zip(left_keys, right_keys)):
+            tmp_l = f"__jk_l_{index}_{key_idx}__"
+            tmp_r = f"__jk_r_{index}_{key_idx}__"
+            merged[tmp_l] = merged[left_key].where(merged[left_key].notna(), "").astype(str).str.strip()
+            right_df[tmp_r] = right_df[right_key].where(right_df[right_key].notna(), "").astype(str).str.strip()
+            temp_left_keys.append(tmp_l)
+            temp_right_keys.append(tmp_r)
+        merged = merged.merge(right_df, left_on=temp_left_keys, right_on=temp_right_keys,
                               how=join.how, validate="many_to_many")
+        merged.drop(columns=[c for c in (*temp_left_keys, *temp_right_keys) if c in merged.columns], inplace=True)
+        right_df.drop(columns=temp_right_keys, inplace=True)
         included.add(source.alias)
     output_columns = [f"{source.alias}.{field.upper()}" for source in dto.sources for field in source.fields]
     rows = json.loads(merged[output_columns].to_json(orient="records", date_format="iso"))
@@ -1872,6 +1888,10 @@ def pivot_data(dto: PivotIn) -> dict[str, Any]:
 
         frame[dto.values] = frame.apply(coalesce_val, axis=1)
 
+    null_sentinel = "__LUMINA_PIVOT_NULL__"
+    for col in index_fields:
+        frame[col] = frame[col].where(frame[col].notna(), null_sentinel)
+
     try:
         if dto.aggregation in ("sum", "mean"):
             frame[dto.values] = pd.to_numeric(frame[dto.values], errors="coerce")
@@ -1881,6 +1901,9 @@ def pivot_data(dto: PivotIn) -> dict[str, Any]:
             index=index_fields, columns=dto.columns, values=dto.values,
             aggfunc=dto.aggregation, observed=True, dropna=True, sort=False,
         ).reset_index()
+        for col in index_fields:
+            if col in result.columns:
+                result[col] = result[col].where(result[col] != null_sentinel, None)
         result.columns = [str(x) for x in result.columns]
         rows = json.loads(result.to_json(orient="records", date_format="iso"))
     except (ValueError, TypeError) as exc:

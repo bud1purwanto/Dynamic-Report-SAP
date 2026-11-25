@@ -152,7 +152,7 @@ def direct_call(target: str, name: str, arguments: dict) -> dict:
         rows = []
         offset = 0
         while True:
-            batch = min(1000, limit - offset) if limit else 1000
+            batch = min(5000, limit - offset) if limit else 5000
             data = conn.call("RFC_READ_TABLE", QUERY_TABLE=table.upper(), DELIMITER="", ROWSKIPS=offset, ROWCOUNT=batch,
                              FIELDS=[{"FIELDNAME": f.upper()} for f in fields], OPTIONS=[{"TEXT": line} for line in where])
             layout = data.get("FIELDS", [])

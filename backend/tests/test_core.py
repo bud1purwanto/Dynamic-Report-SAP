@@ -713,6 +713,49 @@ class DataProcessingTests(unittest.IsolatedAsyncioTestCase):
         t3_cuobjs = [f.value for f in t3_calls[0].filters if f.field == "CUOBJ"]
         self.assertEqual(sorted(t3_cuobjs), ["OBJ_1", "OBJ_2"])
 
+    async def test_execute_query_allows_cross_type_join_numc_char(self):
+        async def structure(_token, _target, table):
+            if table == "MCH1":
+                return [{"name": "CHARG", "data_type": "CHAR"}, {"name": "CUOBJ_BM", "data_type": "NUMC"}], ""
+            return [{"name": "OBJEK", "data_type": "CHAR"}, {"name": "ATINN", "data_type": "CHAR"}, {"name": "ATWRT", "data_type": "CHAR"}], ""
+
+        async def read_rows(dto, _token):
+            if dto.table_name == "MCH1":
+                return [{"CHARG": "B001", "CUOBJ_BM": "000000000000520458"}]
+            return [{"OBJEK": "000000000000520458", "ATINN": "0000000811", "ATWRT": "A1G"}]
+
+        query = main.QueryIn(
+            target="conn-dev",
+            sources=[
+                main.SourceIn(alias="T1", table_name="MCH1", fields=["CHARG", "CUOBJ_BM"]),
+                main.SourceIn(alias="T2", table_name="AUSP", fields=["ATINN", "ATWRT"]),
+            ],
+            joins=[main.JoinIn(left_alias="T1", left_field="CUOBJ_BM", right_alias="T2", right_field="OBJEK", how="inner")],
+        )
+        with patch.object(main, "user_catalog", AsyncMock(return_value=[{"id": "conn-dev", "resource_key": "sap:dev"}])), \
+             patch.object(main, "get_structure", AsyncMock(side_effect=structure)), \
+             patch.object(main, "read_rows", AsyncMock(side_effect=read_rows)):
+            result = await main.execute_query(query, "user-token")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["T2.ATWRT"], "A1G")
+
+    def test_pivot_data_preserves_rows_with_null_left_join_index_fields(self):
+        res = main.pivot_data(main.PivotIn(
+            rows=[
+                {"T1.CHARG": "0000366399", "T6.EXIDV": None, "T2.ATINN": "0000000811", "T2.ATWRT": "A1G"},
+                {"T1.CHARG": "0000366399", "T6.EXIDV": None, "T2.ATINN": "0000000812", "T2.ATWRT": "035"},
+            ],
+            index=["T1.CHARG", "T6.EXIDV"],
+            columns="T2.ATINN",
+            values="T2.ATWRT",
+            aggregation="first",
+        ))
+        self.assertEqual(len(res["rows"]), 1)
+        self.assertEqual(res["rows"][0]["T1.CHARG"], "0000366399")
+        self.assertIsNone(res["rows"][0]["T6.EXIDV"])
+        self.assertEqual(res["rows"][0]["0000000811"], "A1G")
+        self.assertEqual(res["rows"][0]["0000000812"], "035")
+
     async def test_rename_report(self):
         mock_db = MagicMock()
         mock_report = SimpleNamespace(id="rep-1", owner_id="user-123", name="Old Name")

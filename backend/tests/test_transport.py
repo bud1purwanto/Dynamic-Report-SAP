@@ -117,6 +117,23 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 await main.rpc_call('tok', 'sap:dev', 'mcp-sap__read_table', {})
             self.assertEqual(caught.exception.status_code, 403)
 
+    async def test_user_catalog_skips_gateway_probe_when_pyrfc_is_active_route(self):
+        from types import SimpleNamespace
+        resources = [
+            {"serverId": "gateway", "kind": "sap", "resource_key": "sap:dev", "label": "DEV"},
+            {"serverId": "gateway", "kind": "sap", "resource_key": "sap:prd", "label": "PRD"},
+        ]
+        response = SimpleNamespace(status_code=200, json=lambda: [{"id": "conn-dev", "resourceKey": "sap:dev"}])
+        cfg = main.TransportIn(enable_pyrfc=True, enable_oidc_gateway=True, transport_priority='pyrfc').model_dump()
+        with patch.object(main, 'transport_config', return_value=cfg), \
+             patch.object(main, 'catalog', AsyncMock(return_value=resources)), \
+             patch.object(main.httpx, 'AsyncClient') as client_class, \
+             patch.object(main, 'gateway_allows_resource', AsyncMock(return_value=None)) as probe:
+            client_class.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+            visible = await main.user_catalog('user-token')
+        self.assertEqual([item['resource_key'] for item in visible], ['sap:dev'])
+        probe.assert_not_awaited()
+
     async def test_admin_rejects_forged_local_profile(self):
         from types import SimpleNamespace
         auth = (SimpleNamespace(user_profile={'role': 'SUPERADMIN'}, user_id='u'), 'token')
